@@ -24,10 +24,12 @@ def get_current(lat: float = Query(...), lon: float = Query(...)):
             lon=lon,
             depth=0,
             method="nearest"
-        ).isel(time=0)
-
-        u = float(subset["water_u"].values)
-        v = float(subset["water_v"].values)
+        )
+        print("DEBUG subset ↓↓↓")
+        print(subset)
+        
+        u = float(subset["water_u"].isel(time=0, depth=0).values)
+        v = float(subset["water_v"].isel(time=0, depth=0).values)
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
 
