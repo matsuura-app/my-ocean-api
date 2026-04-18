@@ -19,21 +19,33 @@ ds = xr.open_dataset(
 @app.get("/current")
 def get_current(lat: float = Query(...), lon: float = Query(...)):
     try:
+        # --- 経度の変換ロジック (重要) ---
+        # HYCOMのlonが0-360の場合、負の値が来たら360足す
+        target_lon = lon if lon >= 0 else lon + 360
+        
+        # もしデータの座標系を確認して 132.5 が 132.5 として存在しない場合
+        # データの lon.values を print して確認してみてください。
+        
         subset = ds.sel(
             lat=lat,
-            lon=lon,
+            lon=target_lon, # 変換後の経度を使用
             method="nearest"
         ).isel(time=0)
 
-        # depth対応
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
 
-        print("DEBUG subset ↓↓↓")
-        print(subset)
+        # .values.item() の前に、値が存在するかチェック
+        u_val = subset["water_u"].values
+        v_val = subset["water_v"].values
 
-        u = float(subset["water_u"].values.item())
-        v = float(subset["water_v"].values.item())
+        # 配列が空でないか、または複数入っていないか確認して抽出
+        u = float(u_val.flatten()[0])
+        v = float(v_val.flatten()[0])
+
+        # 無効値（NaN）のチェック
+        if np.isnan(u) or np.isnan(v):
+            return {"status": "error", "message": "No data found for this location (陸地の可能性があります)"}
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
 
@@ -43,6 +55,7 @@ def get_current(lat: float = Query(...), lon: float = Query(...)):
             "lat": lat,
             "lon": lon
         }
+
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
