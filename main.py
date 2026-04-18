@@ -19,21 +19,21 @@ ds = xr.open_dataset(
 @app.get("/current")
 def get_current(lat: float = Query(...), lon: float = Query(...)):
     try:
-       subset = ds.sel(
-           lat=lat,
-           lon=lon,
-           method="nearest"
-      ).isel(time=0)
+        subset = ds.sel(
+            lat=lat,
+            lon=lon,
+            method="nearest"
+        ).isel(time=0)
 
-        # 👇 depthがあるかチェック
-     if "depth" in subset.dims:
-      subset = subset.isel(depth=0)
+        # depth対応
+        if "depth" in subset.dims:
+            subset = subset.isel(depth=0)
 
-      print("DEBUG subset ↓↓↓")
-      print(subset)
+        print("DEBUG subset ↓↓↓")
+        print(subset)
 
-      u = float(subset["water_u"].values.item())
-      v = float(subset["water_v"].values.item())
+        u = float(subset["water_u"].values.item())
+        v = float(subset["water_v"].values.item())
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
 
