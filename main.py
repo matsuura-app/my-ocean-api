@@ -4,48 +4,37 @@ import numpy as np
 
 app = FastAPI()
 
+# URLが正しいか、Renderからアクセス可能かを確認
 DATA_URL = "https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0/uv3z"
-
-# 🔥 起動時に1回だけ読み込む（超重要）
-ds = xr.open_dataset(
-    DATA_URL,
-    engine="netcdf4",
-    decode_times=False
-).sel(
-    lat=slice(33, 35),   # ←呉周辺だけに絞る（重要）
-    lon=slice(131, 134)
-)
 
 @app.get("/current")
 def get_current(lat: float = Query(...), lon: float = Query(...)):
     try:
-        # --- 経度の変換ロジック (重要) ---
-        # HYCOMのlonが0-360の場合、負の値が来たら360足す
+        # 関数内で読み込むように変更（デバッグのため）
+        # 本来は外が理想ですが、どこで落ちるか特定します
+        ds = xr.open_dataset(
+            DATA_URL,
+            engine="netcdf4",
+            decode_times=False
+        ).sel(
+            lat=slice(33, 35),
+            lon=slice(131, 134)
+        )
+
+        # 経度の変換（HYCOM用: 0-360）
         target_lon = lon if lon >= 0 else lon + 360
+
+        subset = ds.sel(lat=lat, lon=target_lon, method="nearest").isel(time=0)
         
-        # もしデータの座標系を確認して 132.5 が 132.5 として存在しない場合
-        # データの lon.values を print して確認してみてください。
-        
-        subset = ds.sel(
-            lat=lat,
-            lon=target_lon, # 変換後の経度を使用
-            method="nearest"
-        ).isel(time=0)
+        # データの存在確認
+        if "water_u" not in subset:
+             return {"status": "error", "message": "Variable water_u not found"}
 
-        if "depth" in subset.dims:
-            subset = subset.isel(depth=0)
+        u = float(subset["water_u"].values.flatten()[0])
+        v = float(subset["water_v"].values.flatten()[0])
 
-        # .values.item() の前に、値が存在するかチェック
-        u_val = subset["water_u"].values
-        v_val = subset["water_v"].values
-
-        # 配列が空でないか、または複数入っていないか確認して抽出
-        u = float(u_val.flatten()[0])
-        v = float(v_val.flatten()[0])
-
-        # 無効値（NaN）のチェック
-        if np.isnan(u) or np.isnan(v):
-            return {"status": "error", "message": "No data found for this location (陸地の可能性があります)"}
+        if np.isnan(u):
+            return {"status": "error", "message": "Selected point is likely on land (NaN)"}
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
 
@@ -56,10 +45,10 @@ def get_current(lat: float = Query(...), lon: float = Query(...)):
             "lon": lon
         }
 
-
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        # ここでエラー内容を詳しく返すようにします
+        import traceback
+        error_details = traceback.format_exc()
+        print(error_details) # Renderのログに詳細が出ます
+        return {"status": "error", "message": str(e), "details": error_details}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
