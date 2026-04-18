@@ -23,7 +23,7 @@ def get_current(lat: float = Query(...), lon: float = Query(...)):
            lat=lat,
            lon=lon,
            method="nearest"
-           ).isel(time=0)
+        ).isel(time=0, depth=0)
         
         print("DEBUG subset ↓↓↓")
         print(subset)
