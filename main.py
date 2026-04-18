@@ -22,14 +22,13 @@ def get_current(lat: float = Query(...), lon: float = Query(...)):
         subset = ds.sel(
             lat=lat,
             lon=lon,
-            depth=0,
             method="nearest"
         )
         print("DEBUG subset ↓↓↓")
         print(subset)
         
-        u = float(subset["water_u"].isel(time=0, depth=0).values)
-        v = float(subset["water_v"].isel(time=0, depth=0).values)
+        u = float(subset["water_u"].isel(time=0).values)
+        v = float(subset["water_v"].isel(time=0).values)
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
 
