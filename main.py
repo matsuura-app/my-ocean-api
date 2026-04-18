@@ -17,12 +17,15 @@ def get_current(lat: float = Query(...), lon: float = Query(...)):
             engine="netcdf4",
             decode_times=False
         ).sel(
-            lat=slice(33, 35),
-            lon=slice(131, 134)
+            lat=slice(30, 36),
+            lon=slice(130, 135)
         )
 
         # 経度の変換（HYCOM用: 0-360）
         target_lon = lon if lon >= 0 else lon + 360
+        # デバッグ用：実際に今読み込んでいるデータの座標範囲をログに出す
+        print(f"Data Lon Range: {ds.lon.min().values} to {ds.lon.max().values}")
+        print(f"Searching for Lat: {lat}, Lon: {target_lon}")
 
         subset = ds.sel(lat=lat, lon=target_lon, method="nearest").isel(time=0)
         
