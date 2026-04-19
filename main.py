@@ -57,7 +57,7 @@ def get_from_hycom(lat, lon):
 def get_from_umishiru(lat, lon):
     try:
         # ⚠️ あなたのAPIキーを入れる
-        API_KEY = "ここにAPIキー"
+        API_KEY = "75582c7dd45041e7990dcc058ffa60b7"
 
         # ※実際のエンドポイントは契約内容で違うので調整必要
         url = "https://api.umishiru.go.jp/ocean/current"
