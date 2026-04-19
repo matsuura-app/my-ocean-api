@@ -98,4 +98,4 @@ def get_from_umishiru(lat, lon):
 # =========================
 @app.get("/current")
 def get_current(lat: float, lon: float):
-    return get_from_hycom(lat, lon)
+    return {"test": "new code"}
