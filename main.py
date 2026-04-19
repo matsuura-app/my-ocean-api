@@ -97,13 +97,5 @@ def get_from_umishiru(lat, lon):
 # メインAPI
 # =========================
 @app.get("/current")
-def get_current(lat: float = Query(...), lon: float = Query(...)):
-
-    # ① HYCOM
-    result = get_from_hycom(lat, lon)
-
-    # ② ダメならうみしる
-    if result["status"] == "error":
-        return get_from_umishiru(lat, lon)
-
-    return result
+def get_current(lat: float, lon: float):
+    return get_from_hycom(lat, lon)
