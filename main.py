@@ -66,3 +66,49 @@ def get_current(lat: float = Query(...), lon: float = Query(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+from datetime import datetime, timedelta
+
+@app.get("/forecast")
+def get_forecast(lat: float = Query(...), lon: float = Query(...)):
+
+    try:
+        results = []
+
+        for h in range(48):
+
+            subset = ds.sel(
+                lat=lat,
+                lon=lon,
+                method="nearest"
+            ).isel(time=h)
+
+            # 深さ対応
+            if "depth" in subset.dims:
+                subset = subset.isel(depth=0)
+
+            u = float(subset["water_u"].values.flatten()[0])
+            v = float(subset["water_v"].values.flatten()[0])
+
+            if np.isnan(u):
+                continue
+
+            speed = np.sqrt(u**2 + v**2) * 1.94384
+            direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
+
+            results.append({
+                "time": h,  # ←シンプルに時間インデックス
+                "speed": round(speed, 2),
+                "direction": round(direction, 1)
+            })
+
+        return {
+            "status": "success",
+            "data": results
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
