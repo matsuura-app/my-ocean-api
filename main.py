@@ -112,55 +112,68 @@ def get_forecast(lat: float = Query(...), lon: float = Query(...)):
             "status": "error",
             "message": str(e)
         }
+        
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from datetime import datetime, timedelta
 
+
+# =========================
+# 海しる 48時間予測
+# =========================
+
+API_KEY = "75582c7dd45041e7990dcc058ffa60b7"
+
+def fetch_umishiru_hour(area_code, hour):
+
+    target = datetime.utcnow() + timedelta(hours=hour)
+    time_string = target.strftime("%Y%m%d%H%M")
+
+    url = (
+        f"https://api.msil.go.jp/"
+        f"tidal-current-prediction/v3/data"
+        f"?areaCode={area_code}"
+        f"&time={time_string}"
+        f"&key={API_KEY}"
+    )
+
+    try:
+
+        response = requests.get(url, timeout=10)
+        json_data = response.json()
+
+        features = json_data.get("features", [])
+
+        if not features:
+            return None
+
+        props = features[0]["properties"]
+
+        return {
+            "time": hour,
+            "speed": props.get("currentSpeedKt", 0.0),
+            "direction": props.get("currentDirection", 0.0)
+        }
+
+    except:
+        return None
+
+
 @app.get("/umishiru_forecast")
-def umishiru_forecast(areaCode: str):
+def get_umishiru_forecast(areaCode: str):
 
-    api_key = "75582c7dd45041e7990dcc058ffa60b7"
+    with ThreadPoolExecutor(max_workers=16) as executor:
 
-    result = []
-
-    now = datetime.utcnow()
-
-    for hour in range(48):
-
-        target = now + timedelta(hours=hour)
-
-        time_string = target.strftime("%Y%m%d%H%M")
-
-        url = (
-            f"https://api.msil.go.jp/"
-            f"tidal-current-prediction/v3/data"
-            f"?areaCode={areaCode}"
-            f"&time={time_string}"
-            f"&key={api_key}"
+        results = list(
+            executor.map(
+                lambda h: fetch_umishiru_hour(areaCode, h),
+                range(48)
+            )
         )
 
-        try:
-
-            response = requests.get(url, timeout=10)
-
-            json_data = response.json()
-
-            features = json_data.get("features", [])
-
-            if not features:
-                continue
-
-            props = features[0]["properties"]
-
-            result.append({
-                "time": hour,
-                "speed": props.get("currentSpeedKt", 0.0),
-                "direction": props.get("currentDirection", 0.0)
-            })
-
-        except Exception as e:
-            print("ERROR:", e)
+    data = [r for r in results if r is not None]
 
     return {
         "status": "success",
-        "data": result
+        "data": data
     }
