@@ -2,18 +2,17 @@ from fastapi import FastAPI, Query
 import xarray as xr
 import numpy as np
 import requests
-
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import threading
 
 app = FastAPI()
 
+# =========================
+# HYCOM
+# =========================
 DATA_URL = "https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0/uv3z"
 
-# =========================
-# HYCOMロード
-# =========================
 ds = xr.open_dataset(
     DATA_URL,
     engine="netcdf4",
@@ -24,34 +23,15 @@ ds = xr.open_dataset(
 )
 
 # =========================
-# キャッシュ
+# キャッシュ（重要）
 # =========================
 forecast_cache = {}
-umishiru_cache = {}
 
-# =========================
-# ウォームアップ（重要）
-# =========================
-def warmup_all():
-
-    try:
-        print("WARMING UP HYCOM...")
-
-        _ = ds.isel(time=0, lat=0, lon=0).values
-
-        print("HYCOM READY")
-
-    except Exception as e:
-        print("HYCOM WARMUP FAILED:", e)
-
-# =========================
-# 起動時バックグラウンドウォーム
-# =========================
-@app.on_event("startup")
-def startup_event():
-
-    thread = threading.Thread(target=warmup_all)
-    thread.start()
+umishiru_cache = {
+    "date": None,
+    "data": None,
+    "building": False
+}
 
 # =========================
 # HYCOM 現在流
@@ -59,21 +39,16 @@ def startup_event():
 def get_from_hycom(lat, lon):
 
     try:
-
-        subset = ds.sel(lat=lat, lon=lon, method="nearest")
-        subset = subset.isel(time=0)
+        subset = ds.sel(lat=lat, lon=lon, method="nearest").isel(time=0)
 
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
 
-        u = subset["water_u"].values
-        v = subset["water_v"].values
+        u = float(subset["water_u"].values)
+        v = float(subset["water_v"].values)
 
         if np.isnan(u) or np.isnan(v):
             return {"status": "error", "message": "land"}
-
-        u = float(u)
-        v = float(v)
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
         direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
@@ -89,25 +64,17 @@ def get_from_hycom(lat, lon):
         return {"status": "error", "message": str(e)}
 
 # =========================
-# current
+# API
 # =========================
 @app.get("/current")
-def get_current(lat: float = Query(...), lon: float = Query(...)):
+def current(lat: float = Query(...), lon: float = Query(...)):
     return get_from_hycom(lat, lon)
 
 # =========================
-# warmup API
-# =========================
-@app.get("/warmup")
-def warmup():
-    warmup_all()
-    return {"status": "warmed"}
-
-# =========================
-# forecast
+# HYCOM 48h forecast
 # =========================
 @app.get("/forecast")
-def get_forecast(lat: float = Query(...), lon: float = Query(...)):
+def forecast(lat: float = Query(...), lon: float = Query(...)):
 
     key = f"{round(lat,2)}_{round(lon,2)}"
     now = datetime.utcnow().timestamp()
@@ -116,56 +83,53 @@ def get_forecast(lat: float = Query(...), lon: float = Query(...)):
         if now - forecast_cache[key]["time"] < 1800:
             return forecast_cache[key]["data"]
 
-    try:
+    results = []
 
-        results = []
+    for h in range(48):
 
-        for h in range(48):
+        subset = ds.sel(lat=lat, lon=lon, method="nearest").isel(time=h)
 
-            subset = ds.sel(lat=lat, lon=lon, method="nearest").isel(time=h)
+        if "depth" in subset.dims:
+            subset = subset.isel(depth=0)
 
-            if "depth" in subset.dims:
-                subset = subset.isel(depth=0)
+        u = float(subset["water_u"].values)
+        v = float(subset["water_v"].values)
 
-            u = subset["water_u"].values
-            v = subset["water_v"].values
+        if np.isnan(u) or np.isnan(v):
+            continue
 
-            if np.isnan(u) or np.isnan(v):
-                continue
+        speed = np.sqrt(u**2 + v**2) * 1.94384
+        direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
 
-            speed = np.sqrt(float(u)**2 + float(v)**2) * 1.94384
-            direction = (np.degrees(np.arctan2(float(v), float(u))) + 360) % 360
+        results.append({
+            "time": h,
+            "speed": round(speed, 2),
+            "direction": round(direction, 1)
+        })
 
-            results.append({
-                "time": h,
-                "speed": round(speed, 2),
-                "direction": round(direction, 1)
-            })
+    response = {
+        "status": "success",
+        "data": results
+    }
 
-        response = {
-            "status": "success",
-            "data": results
-        }
+    forecast_cache[key] = {
+        "time": now,
+        "data": response
+    }
 
-        forecast_cache[key] = {
-            "time": now,
-            "data": response
-        }
-
-        return response
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return response
 
 # =========================
-# 海しる
+# 海しるAPIキー
 # =========================
 API_KEY = "YOUR_KEY"
 
+# =========================
+# 海しる 単発取得
+# =========================
 def fetch_umishiru_hour(area_code, hour):
 
     try:
-
         target = datetime.utcnow() + timedelta(hours=hour)
         time_string = target.strftime("%Y%m%d%H%M")
 
@@ -182,8 +146,8 @@ def fetch_umishiru_hour(area_code, hour):
             return None
 
         data = r.json()
-
         features = data.get("features", [])
+
         if not features:
             return None
 
@@ -199,40 +163,60 @@ def fetch_umishiru_hour(area_code, hour):
         return None
 
 # =========================
-# 海しる forecast
+# 48時間取得
 # =========================
-@app.get("/umishiru_forecast")
-def umishiru_forecast(areaCode: str):
-
-    now = datetime.utcnow().timestamp()
-
-    if areaCode in umishiru_cache:
-        if now - umishiru_cache[areaCode]["time"] < 300:
-            return umishiru_cache[areaCode]["data"]
+def fetch_48h(area_code):
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-
         results = list(executor.map(
-            lambda h: fetch_umishiru_hour(areaCode, h),
+            lambda h: fetch_umishiru_hour(area_code, h),
             range(48)
         ))
 
-    data = [r for r in results if r]
-
-    response = {
+    return {
         "status": "success",
-        "data": data
+        "data": [r for r in results if r]
     }
-
-    umishiru_cache[areaCode] = {
-        "time": now,
-        "data": response
-    }
-
-    return response
 
 # =========================
-# run
+# コアロジック（即レス + 裏更新）
+# =========================
+def get_umishiru(areaCode):
+
+    today = datetime.utcnow().date()
+
+    # ① 今日データあるなら即返す
+    if umishiru_cache["date"] == today:
+        return umishiru_cache["data"]
+
+    # ② 前日データ返す
+    fallback = umishiru_cache["data"]
+
+    # ③ 裏で更新（1回だけ）
+    if not umishiru_cache["building"]:
+
+        umishiru_cache["building"] = True
+
+        def build():
+            data = fetch_48h(areaCode)
+
+            umishiru_cache["date"] = today
+            umishiru_cache["data"] = data
+            umishiru_cache["building"] = False
+
+        threading.Thread(target=build).start()
+
+    return fallback
+
+# =========================
+# 海しるAPI
+# =========================
+@app.get("/umishiru_forecast")
+def umishiru_forecast(areaCode: str):
+    return get_umishiru(areaCode)
+
+# =========================
+# 起動
 # =========================
 if __name__ == "__main__":
     import uvicorn
