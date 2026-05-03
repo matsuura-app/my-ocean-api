@@ -165,25 +165,18 @@ def get_umishiru_forecast(areaCode: str):
 
     now_time = datetime.utcnow().timestamp()
 
-    # =========================
     # キャッシュ確認
-    # =========================
-
     if areaCode in umishiru_cache:
 
         cache_time = umishiru_cache[areaCode]["time"]
 
-        # 5分以内なら再利用
         if now_time - cache_time < 300:
 
             print("CACHE HIT:", areaCode)
 
             return umishiru_cache[areaCode]["data"]
 
-    # =========================
     # 新規取得
-    # =========================
-
     with ThreadPoolExecutor(max_workers=48) as executor:
 
         results = list(
@@ -200,15 +193,10 @@ def get_umishiru_forecast(areaCode: str):
         "data": data
     }
 
-    # =========================
     # キャッシュ保存
-    # =========================
-
     umishiru_cache[areaCode] = {
         "time": now_time,
         "data": response
     }
 
     return response
-
-}
