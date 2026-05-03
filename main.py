@@ -117,7 +117,8 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 from datetime import datetime, timedelta
 
-
+# キャッシュ保存用
+umishiru_cache = {}
 # =========================
 # 海しる 48時間予測
 # =========================
@@ -162,7 +163,28 @@ def fetch_umishiru_hour(area_code, hour):
 @app.get("/umishiru_forecast")
 def get_umishiru_forecast(areaCode: str):
 
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    now_time = datetime.utcnow().timestamp()
+
+    # =========================
+    # キャッシュ確認
+    # =========================
+
+    if areaCode in umishiru_cache:
+
+        cache_time = umishiru_cache[areaCode]["time"]
+
+        # 5分以内なら再利用
+        if now_time - cache_time < 300:
+
+            print("CACHE HIT:", areaCode)
+
+            return umishiru_cache[areaCode]["data"]
+
+    # =========================
+    # 新規取得
+    # =========================
+
+    with ThreadPoolExecutor(max_workers=48) as executor:
 
         results = list(
             executor.map(
@@ -173,7 +195,20 @@ def get_umishiru_forecast(areaCode: str):
 
     data = [r for r in results if r is not None]
 
-    return {
+    response = {
         "status": "success",
         "data": data
     }
+
+    # =========================
+    # キャッシュ保存
+    # =========================
+
+    umishiru_cache[areaCode] = {
+        "time": now_time,
+        "data": response
+    }
+
+    return response
+
+}
