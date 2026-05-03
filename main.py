@@ -112,3 +112,55 @@ def get_forecast(lat: float = Query(...), lon: float = Query(...)):
             "status": "error",
             "message": str(e)
         }
+import requests
+from datetime import datetime, timedelta
+
+@app.get("/umishiru_forecast")
+def umishiru_forecast(areaCode: str):
+
+    api_key = "75582c7dd45041e7990dcc058ffa60b7"
+
+    result = []
+
+    now = datetime.utcnow()
+
+    for hour in range(48):
+
+        target = now + timedelta(hours=hour)
+
+        time_string = target.strftime("%Y%m%d%H%M")
+
+        url = (
+            f"https://api.msil.go.jp/"
+            f"tidal-current-prediction/v3/data"
+            f"?areaCode={areaCode}"
+            f"&time={time_string}"
+            f"&key={api_key}"
+        )
+
+        try:
+
+            response = requests.get(url, timeout=10)
+
+            json_data = response.json()
+
+            features = json_data.get("features", [])
+
+            if not features:
+                continue
+
+            props = features[0]["properties"]
+
+            result.append({
+                "time": hour,
+                "speed": props.get("currentSpeedKt", 0.0),
+                "direction": props.get("currentDirection", 0.0)
+            })
+
+        except Exception as e:
+            print("ERROR:", e)
+
+    return {
+        "status": "success",
+        "data": result
+    }
