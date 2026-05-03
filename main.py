@@ -61,11 +61,9 @@ def get_from_hycom(lat, lon):
 def get_current(lat: float = Query(...), lon: float = Query(...)):
     return get_from_hycom(lat, lon)
 
-
-# Render用
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/warmup")
+def warmup():
+    return {"status": "ready"}
 
 from datetime import datetime, timedelta
 
@@ -200,3 +198,8 @@ def get_umishiru_forecast(areaCode: str):
     }
 
     return response
+
+# Render用
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
