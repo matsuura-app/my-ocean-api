@@ -5,13 +5,14 @@ import requests
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+import threading
 
 app = FastAPI()
 
 DATA_URL = "https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0/uv3z"
 
 # =========================
-# 起動時に1回だけ読み込み
+# HYCOMロード
 # =========================
 ds = xr.open_dataset(
     DATA_URL,
@@ -29,29 +30,50 @@ forecast_cache = {}
 umishiru_cache = {}
 
 # =========================
+# ウォームアップ（重要）
+# =========================
+def warmup_all():
+
+    try:
+        print("WARMING UP HYCOM...")
+
+        _ = ds.isel(time=0, lat=0, lon=0).values
+
+        print("HYCOM READY")
+
+    except Exception as e:
+        print("HYCOM WARMUP FAILED:", e)
+
+# =========================
+# 起動時バックグラウンドウォーム
+# =========================
+@app.on_event("startup")
+def startup_event():
+
+    thread = threading.Thread(target=warmup_all)
+    thread.start()
+
+# =========================
 # HYCOM 現在流
 # =========================
 def get_from_hycom(lat, lon):
 
     try:
 
-        subset = ds.sel(
-            lat=lat,
-            lon=lon,
-            method="nearest"
-        ).isel(time=0)
+        subset = ds.sel(lat=lat, lon=lon, method="nearest")
+        subset = subset.isel(time=0)
 
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
 
-        u = float(subset["water_u"].values.flatten()[0])
-        v = float(subset["water_v"].values.flatten()[0])
+        u = subset["water_u"].values
+        v = subset["water_v"].values
 
-        if np.isnan(u):
-            return {
-                "status": "error",
-                "message": "land"
-            }
+        if np.isnan(u) or np.isnan(v):
+            return {"status": "error", "message": "land"}
+
+        u = float(u)
+        v = float(v)
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
         direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
@@ -64,52 +86,35 @@ def get_from_hycom(lat, lon):
         }
 
     except Exception as e:
-
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 # =========================
-# 現在流 API
+# current
 # =========================
 @app.get("/current")
-def get_current(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
+def get_current(lat: float = Query(...), lon: float = Query(...)):
     return get_from_hycom(lat, lon)
 
 # =========================
-# Warmup
+# warmup API
 # =========================
 @app.get("/warmup")
 def warmup():
-    return {"status": "ready"}
+    warmup_all()
+    return {"status": "warmed"}
 
 # =========================
-# HYCOM 48時間予測
+# forecast
 # =========================
 @app.get("/forecast")
-def get_forecast(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
+def get_forecast(lat: float = Query(...), lon: float = Query(...)):
 
-    cache_key = f"{round(lat,2)}_{round(lon,2)}"
+    key = f"{round(lat,2)}_{round(lon,2)}"
+    now = datetime.utcnow().timestamp()
 
-    now_time = datetime.utcnow().timestamp()
-
-    # キャッシュ確認
-    if cache_key in forecast_cache:
-
-        cache_time = forecast_cache[cache_key]["time"]
-
-        if now_time - cache_time < 1800:
-
-            print("HYCOM CACHE HIT:", cache_key)
-
-            return forecast_cache[cache_key]["data"]
+    if key in forecast_cache:
+        if now - forecast_cache[key]["time"] < 1800:
+            return forecast_cache[key]["data"]
 
     try:
 
@@ -117,23 +122,19 @@ def get_forecast(
 
         for h in range(48):
 
-            subset = ds.sel(
-                lat=lat,
-                lon=lon,
-                method="nearest"
-            ).isel(time=h)
+            subset = ds.sel(lat=lat, lon=lon, method="nearest").isel(time=h)
 
             if "depth" in subset.dims:
                 subset = subset.isel(depth=0)
 
-            u = float(subset["water_u"].values.flatten()[0])
-            v = float(subset["water_v"].values.flatten()[0])
+            u = subset["water_u"].values
+            v = subset["water_v"].values
 
-            if np.isnan(u):
+            if np.isnan(u) or np.isnan(v):
                 continue
 
-            speed = np.sqrt(u**2 + v**2) * 1.94384
-            direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
+            speed = np.sqrt(float(u)**2 + float(v)**2) * 1.94384
+            direction = (np.degrees(np.arctan2(float(v), float(u))) + 360) % 360
 
             results.append({
                 "time": h,
@@ -146,115 +147,94 @@ def get_forecast(
             "data": results
         }
 
-        # キャッシュ保存
-        forecast_cache[cache_key] = {
-            "time": now_time,
+        forecast_cache[key] = {
+            "time": now,
             "data": response
         }
 
         return response
 
     except Exception as e:
-
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 # =========================
 # 海しる
 # =========================
-API_KEY = "75582c7dd45041e7990dcc058ffa60b7"
+API_KEY = "YOUR_KEY"
 
 def fetch_umishiru_hour(area_code, hour):
 
-    target = datetime.utcnow() + timedelta(hours=hour)
-
-    time_string = target.strftime("%Y%m%d%H%M")
-
-    url = (
-        f"https://api.msil.go.jp/"
-        f"tidal-current-prediction/v3/data"
-        f"?areaCode={area_code}"
-        f"&time={time_string}"
-        f"&key={API_KEY}"
-    )
-
     try:
 
-        response = requests.get(url, timeout=10)
+        target = datetime.utcnow() + timedelta(hours=hour)
+        time_string = target.strftime("%Y%m%d%H%M")
 
-        json_data = response.json()
+        url = (
+            "https://api.msil.go.jp/tidal-current-prediction/v3/data"
+            f"?areaCode={area_code}"
+            f"&time={time_string}"
+            f"&key={API_KEY}"
+        )
 
-        features = json_data.get("features", [])
+        r = requests.get(url, timeout=15)
 
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+
+        features = data.get("features", [])
         if not features:
             return None
 
-        props = features[0]["properties"]
+        p = features[0]["properties"]
 
         return {
             "time": hour,
-            "speed": props.get("currentSpeedKt", 0.0),
-            "direction": props.get("currentDirection", 0.0)
+            "speed": p.get("currentSpeedKt", 0.0),
+            "direction": p.get("currentDirection", 0.0)
         }
 
     except:
         return None
 
 # =========================
-# 海しる48時間予測
+# 海しる forecast
 # =========================
 @app.get("/umishiru_forecast")
-def get_umishiru_forecast(areaCode: str):
+def umishiru_forecast(areaCode: str):
 
-    now_time = datetime.utcnow().timestamp()
+    now = datetime.utcnow().timestamp()
 
-    # キャッシュ確認
     if areaCode in umishiru_cache:
-
-        cache_time = umishiru_cache[areaCode]["time"]
-
-        if now_time - cache_time < 300:
-
-            print("UMISHIRU CACHE HIT:", areaCode)
-
+        if now - umishiru_cache[areaCode]["time"] < 300:
             return umishiru_cache[areaCode]["data"]
 
-    # 新規取得
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
 
-        results = list(
-            executor.map(
-                lambda h: fetch_umishiru_hour(areaCode, h),
-                range(48)
-            )
-        )
+        results = list(executor.map(
+            lambda h: fetch_umishiru_hour(areaCode, h),
+            range(48)
+        ))
 
-    data = [r for r in results if r is not None]
+    data = [r for r in results if r]
 
     response = {
         "status": "success",
         "data": data
     }
 
-    # キャッシュ保存
     umishiru_cache[areaCode] = {
-        "time": now_time,
+        "time": now,
         "data": response
     }
 
     return response
 
 # =========================
-# Render用
+# run
 # =========================
 if __name__ == "__main__":
-
     import uvicorn
 
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000)
