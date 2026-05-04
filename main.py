@@ -87,13 +87,20 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
 
     for h in range(48):
 
-        subset = ds.sel(lat=lat, lon=lon, method="nearest").isel(time=h)
+        subset = ds.sel(
+            lat=lat,
+            lon=lon,
+            method="nearest"
+        ).isel(time=h)
 
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
 
-        u = float(subset["water_u"].values)
-        v = float(subset["water_v"].values)
+        try:
+            u = float(subset["water_u"].values)
+            v = float(subset["water_v"].values)
+        except:
+            continue
 
         if np.isnan(u) or np.isnan(v):
             continue
@@ -107,6 +114,12 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
             "direction": round(direction, 1)
         })
 
+    if len(results) == 0:
+        return {
+            "status": "error",
+            "data": []
+        }
+
     response = {
         "status": "success",
         "data": results
@@ -118,7 +131,6 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
     }
 
     return response
-
 # =========================
 # 海しるAPIキー
 # =========================
@@ -192,12 +204,36 @@ def get_umishiru(areaCode):
     # ② 前日データ返す
     fallback = umishiru_cache["data"]
 
+    # 初回起動時
+    if fallback is None:
+
+        # 裏更新開始
+        if not umishiru_cache["building"]:
+
+            umishiru_cache["building"] = True
+
+            def build():
+
+                data = fetch_48h(areaCode)
+
+                umishiru_cache["date"] = today
+                umishiru_cache["data"] = data
+                umishiru_cache["building"] = False
+
+            threading.Thread(target=build).start()
+
+        return {
+            "status": "loading",
+            "data": []
+        }
+
     # ③ 裏で更新（1回だけ）
     if not umishiru_cache["building"]:
 
         umishiru_cache["building"] = True
 
         def build():
+
             data = fetch_48h(areaCode)
 
             umishiru_cache["date"] = today
@@ -207,7 +243,6 @@ def get_umishiru(areaCode):
         threading.Thread(target=build).start()
 
     return fallback
-
 # =========================
 # 海しるAPI
 # =========================
