@@ -130,7 +130,7 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
 # =========================
 # 海しるAPIキー
 # =========================
-API_KEY = "YOUR_KEY"
+API_KEY = "75582c7dd45041e7990dcc058ffa60b7"
 
 # =========================
 # 海しる 単発取得
