@@ -181,9 +181,17 @@ def fetch_48h(area_code):
             range(48)
         ))
 
+    filtered = [r for r in results if r]
+
+    if len(filtered) == 0:
+        return {
+            "status": "error",
+            "data": []
+        }
+
     return {
         "status": "success",
-        "data": [r for r in results if r]
+        "data": filtered
     }
 
 # =========================
@@ -199,55 +207,32 @@ def get_umishiru(areaCode):
         }
 
     cache = umishiru_cache[areaCode]
-
     today = datetime.utcnow().date()
 
-    # ① 今日データあるなら即返す
-    if cache["date"] == today:
+    # 今日のキャッシュ
+    if cache["date"] == today and cache["data"]:
         return cache["data"]
 
-    # ② 前日データ返す
-    fallback = cache["data"]
+    # 生成中なら古いデータ返す
+    if cache["building"] and cache["data"]:
+        return cache["data"]
 
-    # 初回起動時
-    if fallback is None:
+    # 更新開始
+    cache["building"] = True
 
-        # 裏更新開始
-        if not cache["building"]:
+    try:
 
-            cache["building"] = True
+        data = fetch_48h(areaCode)
 
-            def build():
-
-                data = fetch_48h(areaCode)
-
-                cache["date"] = today
-                cache["data"] = data
-                cache["building"] = False
-
-            threading.Thread(target=build).start()
-
-        return {
-            "status": "loading",
-            "data": []
-        }
-
-    # ③ 裏で更新（1回だけ）
-    if not cache["building"]:
-
-        cache["building"] = True
-
-        def build():
-
-            data = fetch_48h(areaCode)
-
+        if data["status"] == "success":
             cache["date"] = today
             cache["data"] = data
-            cache["building"] = False
 
-        threading.Thread(target=build).start()
+        return data
 
-    return fallback
+    finally:
+
+        cache["building"] = False
 # =========================
 # 海しるAPI
 # =========================
