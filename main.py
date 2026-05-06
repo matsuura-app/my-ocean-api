@@ -27,11 +27,7 @@ ds = xr.open_dataset(
 # =========================
 forecast_cache = {}
 
-umishiru_cache = {
-    "date": None,
-    "data": None,
-    "building": False
-}
+umishiru_cache = {}
 
 # =========================
 # HYCOM 現在流
@@ -195,30 +191,39 @@ def fetch_48h(area_code):
 # =========================
 def get_umishiru(areaCode):
 
+    if areaCode not in umishiru_cache:
+        umishiru_cache[areaCode] = {
+            "date": None,
+            "data": None,
+            "building": False
+        }
+
+    cache = umishiru_cache[areaCode]
+
     today = datetime.utcnow().date()
 
     # ① 今日データあるなら即返す
-    if umishiru_cache["date"] == today:
-        return umishiru_cache["data"]
+    if cache["date"] == today:
+        return cache["data"]
 
     # ② 前日データ返す
-    fallback = umishiru_cache["data"]
+    fallback = cache["data"]
 
     # 初回起動時
     if fallback is None:
 
         # 裏更新開始
-        if not umishiru_cache["building"]:
+        if not cache["building"]:
 
-            umishiru_cache["building"] = True
+            cache["building"] = True
 
             def build():
 
                 data = fetch_48h(areaCode)
 
-                umishiru_cache["date"] = today
-                umishiru_cache["data"] = data
-                umishiru_cache["building"] = False
+                cache["date"] = today
+                cache["data"] = data
+                cache["building"] = False
 
             threading.Thread(target=build).start()
 
@@ -228,17 +233,17 @@ def get_umishiru(areaCode):
         }
 
     # ③ 裏で更新（1回だけ）
-    if not umishiru_cache["building"]:
+    if not cache["building"]:
 
-        umishiru_cache["building"] = True
+        cache["building"] = True
 
         def build():
 
             data = fetch_48h(areaCode)
 
-            umishiru_cache["date"] = today
-            umishiru_cache["data"] = data
-            umishiru_cache["building"] = False
+            cache["date"] = today
+            cache["data"] = data
+            cache["building"] = False
 
         threading.Thread(target=build).start()
 
