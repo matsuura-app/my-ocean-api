@@ -156,6 +156,11 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
         v = float(subset["water_v"].values)
 
         if np.isnan(u) or np.isnan(v):
+            results.append({
+                "time": h,
+                "speed": 0.0,
+                "direction": 0.0
+            })
             continue
 
         results.append({
