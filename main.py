@@ -4,6 +4,7 @@ import numpy as np
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from datetime import timezone
 import threading
 
 app = FastAPI()
@@ -114,9 +115,39 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
 
     results = []
 
+    # =========================
+    # 今日0時UTC
+    # =========================
+    utc_now = datetime.utcnow()
+
+    base_utc = utc_now.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0
+    )
+
+    # HYCOM開始時刻
+    hycom_start = datetime(2000, 1, 1)
+
+    # HYCOM time[0]
+    first_time = float(ds_local["time"].values[0])
+
+    first_datetime = hycom_start + timedelta(hours=first_time)
+
+    # 0時との差
+    offset_hours = int(
+        (base_utc - first_datetime).total_seconds() / 3600
+    )
+
+    # =========================
+    # 48時間
+    # =========================
     for h in range(48):
 
-        subset = point.isel(time=h)
+        idx = offset_hours + h
+
+        subset = point.isel(time=idx)
 
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
@@ -138,7 +169,7 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
         "data": results
     }
 
-    # 🔥 キャッシュ制限（修正済み）
+    # キャッシュ整理
     with lock:
         if len(forecast_cache) > 200:
             while len(forecast_cache) > 150:
@@ -155,11 +186,19 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
 # =========================
 API_KEY = "75582c7dd45041e7990dcc058ffa60b7"
 
-
 def fetch_umishiru_hour(area_code, hour):
 
     try:
-        target = datetime.utcnow() + timedelta(hours=hour)
+        # 今日0時UTC
+        base = datetime.utcnow().replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        target = base + timedelta(hours=hour)
+
         time_string = target.strftime("%Y%m%d%H%M")
 
         url = (
@@ -188,7 +227,8 @@ def fetch_umishiru_hour(area_code, hour):
             "direction": p.get("currentDirection", 0.0)
         }
 
-    except:
+    except Exception as e:
+        print("umishiru error:", e)
         return None
 
 
