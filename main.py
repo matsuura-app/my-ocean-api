@@ -231,13 +231,6 @@ def save_tide(point, dt, height):
 @app.on_event("startup")
 def startup():
 
-    # SQLite保存テスト
-    save_tide(
-        "呉",
-        "2026-05-19 12:00:00",
-        2.31
-    )
-
     # HYCOM読み込み
     threading.Thread(
         target=load_hycom,
@@ -293,7 +286,12 @@ def fetch_umishiru_hour(area_code, hour):
             return None
 
         p = features[0]["properties"]
-        height = p.get("tideHeightCm", 0.0)
+        print(p)
+        height = (
+            p.get("tideHeightCm")
+            or p.get("tideHeight")
+            or 0.0
+        )
 
         jst_time = (
             target + timedelta(hours=9)
