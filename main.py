@@ -70,35 +70,7 @@ CACHE_TTL = 1800  # 30分
 # =========================
 # 起動処理
 # =========================
-# =========================
-# 起動処理
-# =========================
-@app.on_event("startup")
-def startup():
 
-    # SQLite保存テスト
-    save_tide(
-        "呉",
-        "2026-05-19 12:00:00",
-        2.31
-    )
-
-    # HYCOM読み込み
-    threading.Thread(
-        target=load_hycom,
-        daemon=True
-    ).start()
-
-    # 海しるウォームアップ
-    try:
-        threading.Thread(
-            target=update_umishiru_background,
-            args=("default",),
-            daemon=True
-        ).start()
-
-    except Exception as e:
-        print("warmup failed:", e)
 # =========================
 # HYCOM現在流
 # =========================
@@ -252,6 +224,36 @@ def save_tide(point, dt, height):
 
     except Exception as e:
         print("save_tide error:", e)
+        
+ # =========================
+# 起動処理
+# =========================
+@app.on_event("startup")
+def startup():
+
+    # SQLite保存テスト
+    save_tide(
+        "呉",
+        "2026-05-19 12:00:00",
+        2.31
+    )
+
+    # HYCOM読み込み
+    threading.Thread(
+        target=load_hycom,
+        daemon=True
+    ).start()
+
+    # 海しるウォームアップ
+    try:
+        threading.Thread(
+            target=update_umishiru_background,
+            args=("default",),
+            daemon=True
+        ).start()
+
+    except Exception as e:
+        print("warmup failed:", e)
 # =========================
 # 海しるAPI
 # =========================
@@ -291,7 +293,17 @@ def fetch_umishiru_hour(area_code, hour):
             return None
 
         p = features[0]["properties"]
+        height = p.get("tideHeightCm", 0.0)
 
+        jst_time = (
+            target + timedelta(hours=9)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        save_tide(
+            area_code,
+            jst_time,
+            height
+        )
         return {
             "time": hour,
             "speed": p.get("currentSpeedKt", 0.0),
