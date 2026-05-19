@@ -6,9 +6,31 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from datetime import timezone
 import threading
+import sqlite3
 
 app = FastAPI()
 
+# =========================
+# SQLite
+# =========================
+tide_conn = sqlite3.connect(
+    "tides.db",
+    check_same_thread=False
+)
+
+tide_conn.row_factory = sqlite3.Row
+cur = tide_conn.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS tides (
+    point TEXT,
+    datetime TEXT,
+    height REAL,
+    PRIMARY KEY(point, datetime)
+)
+""")
+
+tide_conn.commit()
 # =========================
 # HYCOM設定
 # =========================
@@ -48,16 +70,33 @@ CACHE_TTL = 1800  # 30分
 # =========================
 # 起動処理
 # =========================
+# =========================
+# 起動処理
+# =========================
 @app.on_event("startup")
 def startup():
-    threading.Thread(target=load_hycom, daemon=True).start()
 
+    # SQLite保存テスト
+    save_tide(
+        "呉",
+        "2026-05-19 12:00:00",
+        2.31
+    )
+
+    # HYCOM読み込み
+    threading.Thread(
+        target=load_hycom,
+        daemon=True
+    ).start()
+
+    # 海しるウォームアップ
     try:
         threading.Thread(
             target=update_umishiru_background,
             args=("default",),
             daemon=True
         ).start()
+
     except Exception as e:
         print("warmup failed:", e)
 # =========================
@@ -186,6 +225,33 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
     }
 
     return response
+
+# =========================
+# Tide Save
+# =========================
+def save_tide(point, dt, height):
+
+    try:
+
+        cur = tide_conn.cursor()
+
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO tides
+            (point, datetime, height)
+            VALUES (?, ?, ?)
+            """,
+            (
+                point,
+                dt,
+                height
+            )
+        )
+
+        tide_conn.commit()
+
+    except Exception as e:
+        print("save_tide error:", e)
 # =========================
 # 海しるAPI
 # =========================
@@ -328,6 +394,50 @@ def get_umishiru(areaCode):
 def current(lat: float = Query(...), lon: float = Query(...)):
     return get_from_hycom(lat, lon)
 
+@app.get("/tide")
+def get_tide(
+    point: str,
+    date: str
+):
+
+    try:
+
+        cur = tide_conn.cursor()
+
+        start = f"{date} 00:00:00"
+        end = f"{date} 23:59:59"
+
+        rows = cur.execute(
+            """
+            SELECT datetime, height
+            FROM tides
+            WHERE point = ?
+            AND datetime BETWEEN ? AND ?
+            ORDER BY datetime
+            """,
+            (point, start, end)
+        ).fetchall()
+
+        result = []
+
+        for r in rows:
+
+            result.append({
+                "time": r["datetime"],
+                "height": r["height"]
+            })
+
+        return {
+            "status": "success",
+            "data": result
+        }
+
+    except Exception as e:
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 @app.get("/umishiru_forecast")
 def umishiru_forecast(areaCode: str):
