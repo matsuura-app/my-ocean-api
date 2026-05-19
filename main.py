@@ -7,30 +7,69 @@ from datetime import datetime, timedelta
 from datetime import timezone
 import threading
 import sqlite3
+import os
+
+# =========================
+# 🔑 環境変数（ここに入れる）
+# =========================
+API_KEY = os.getenv("MSIL_API_KEY")
+if API_KEY is None:
+    print("WARNING: MSIL_API_KEY is not set")
+    
+def get_conn():
+    conn = sqlite3.connect(
+        "tides.db",
+        timeout=10,
+        check_same_thread=False
+    )
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def save_tide(point, dt, height):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT OR REPLACE INTO tides
+        (point, datetime, height)
+        VALUES (?, ?, ?)
+    """, (point, dt, height))
+
+    conn.commit()
+    conn.close()
+    
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS tides (
+        point TEXT,
+        datetime TEXT,
+        height REAL,
+        PRIMARY KEY(point, datetime)
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def save_tide(point, dt, height):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT OR REPLACE INTO tides
+        (point, datetime, height)
+        VALUES (?, ?, ?)
+    """, (point, dt, height))
+
+    conn.commit()
+    conn.close()
 
 app = FastAPI()
 
-# =========================
-# SQLite
-# =========================
-tide_conn = sqlite3.connect(
-    "tides.db",
-    check_same_thread=False
-)
-
-tide_conn.row_factory = sqlite3.Row
-cur = tide_conn.cursor()
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS tides (
-    point TEXT,
-    datetime TEXT,
-    height REAL,
-    PRIMARY KEY(point, datetime)
-)
-""")
-
-tide_conn.commit()
 # =========================
 # HYCOM設定
 # =========================
@@ -65,11 +104,6 @@ umishiru_cache = {}
 lock = threading.Lock()
 
 CACHE_TTL = 1800  # 30分
-
-
-# =========================
-# 起動処理
-# =========================
 
 # =========================
 # HYCOM現在流
@@ -197,60 +231,9 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
     }
 
     return response
-
-# =========================
-# Tide Save
-# =========================
-def save_tide(point, dt, height):
-
-    try:
-
-        cur = tide_conn.cursor()
-
-        cur.execute(
-            """
-            INSERT OR REPLACE INTO tides
-            (point, datetime, height)
-            VALUES (?, ?, ?)
-            """,
-            (
-                point,
-                dt,
-                height
-            )
-        )
-
-        tide_conn.commit()
-
-    except Exception as e:
-        print("save_tide error:", e)
-        
- # =========================
-# 起動処理
-# =========================
-@app.on_event("startup")
-def startup():
-
-    # HYCOM読み込み
-    threading.Thread(
-        target=load_hycom,
-        daemon=True
-    ).start()
-
-    # 海しるウォームアップ
-    try:
-        threading.Thread(
-            target=update_umishiru_background,
-            args=("03",),
-            daemon=True
-        ).start()
-
-    except Exception as e:
-        print("warmup failed:", e)
 # =========================
 # 海しるAPI
 # =========================
-API_KEY = "75582c7dd45041e7990dcc058ffa60b7"
 
 def fetch_umishiru_hour(area_code, hour):
 
@@ -275,9 +258,7 @@ def fetch_umishiru_hour(area_code, hour):
         )
 
         r = requests.get(url, timeout=15)
-        print(url)
-        print(r.status_code)
-        print(r.text)
+
         if r.status_code != 200:
             return None
 
@@ -288,22 +269,17 @@ def fetch_umishiru_hour(area_code, hour):
             return None
 
         p = features[0]["properties"]
-        print(p)
+
         height = (
             p.get("tideHeightCm")
             or p.get("tideHeight")
             or 0.0
         )
 
-        jst_time = (
-            target + timedelta(hours=9)
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        jst_time = (target + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
 
-        save_tide(
-            area_code,
-            jst_time,
-            height
-        )
+        save_tide(area_code, jst_time, height)
+       
         return {
             "time": hour,
             "speed": p.get("currentSpeedKt", 0.0),
@@ -353,6 +329,23 @@ def update_umishiru_background(areaCode):
     finally:
         with lock:
             cache["updating"] = False
+# =========================
+# 起動処理
+# =========================
+@app.on_event("startup")
+def startup():
+    init_db()
+    
+    threading.Thread(target=load_hycom, daemon=True).start()
+
+    try:
+        threading.Thread(
+            target=update_umishiru_background,
+            args=("default",),
+            daemon=True
+        ).start()
+    except Exception as e:
+        print("warmup failed:", e)
 # =========================
 # 海しる取得（即レス + 裏更新）
 # =========================
@@ -405,51 +398,26 @@ def get_umishiru(areaCode):
 @app.get("/current")
 def current(lat: float = Query(...), lon: float = Query(...)):
     return get_from_hycom(lat, lon)
-
+    
 @app.get("/tide")
-def get_tide(
-    point: str,
-    date: str
-):
+def get_tide(point: str):
+    cur = tide_conn.cursor()
 
-    try:
+    rows = cur.execute("""
+        SELECT datetime, height
+        FROM tides
+        WHERE point = ?
+        ORDER BY datetime DESC
+        LIMIT 100
+    """, (point,)).fetchall()
 
-        cur = tide_conn.cursor()
-
-        start = f"{date} 00:00:00"
-        end = f"{date} 23:59:59"
-
-        rows = cur.execute(
-            """
-            SELECT datetime, height
-            FROM tides
-            WHERE point = ?
-            AND datetime BETWEEN ? AND ?
-            ORDER BY datetime
-            """,
-            (point, start, end)
-        ).fetchall()
-
-        result = []
-
-        for r in rows:
-
-            result.append({
-                "time": r["datetime"],
-                "height": r["height"]
-            })
-
-        return {
-            "status": "success",
-            "data": result
-        }
-
-    except Exception as e:
-
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+    return {
+        "status": "success",
+        "data": [
+            {"time": r["datetime"], "height": r["height"]}
+            for r in rows
+        ]
+    }
 
 @app.get("/umishiru_forecast")
 def umishiru_forecast(areaCode: str):
