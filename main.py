@@ -241,7 +241,7 @@ def startup():
     try:
         threading.Thread(
             target=update_umishiru_background,
-            args=("default",),
+            args=("03",),
             daemon=True
         ).start()
 
@@ -275,7 +275,9 @@ def fetch_umishiru_hour(area_code, hour):
         )
 
         r = requests.get(url, timeout=15)
-
+        print(url)
+        print(r.status_code)
+        print(r.text)
         if r.status_code != 200:
             return None
 
