@@ -8,6 +8,7 @@ from datetime import timezone
 import threading
 import sqlite3
 import os
+import json
 
 # =========================
 # 🔑 環境変数（ここに入れる）
@@ -15,7 +16,14 @@ import os
 API_KEY = os.getenv("MSIL_API_KEY")
 if API_KEY is None:
     print("WARNING: MSIL_API_KEY is not set")
-    
+ 
+def load_year_data(point, year):
+    path = f"data/{year}_{point}.json"
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        return json.load(f)
+        return json.load(f)
 def get_conn():
     conn = sqlite3.connect(
         "tides.db",
@@ -28,20 +36,17 @@ def get_conn():
 def save_tide(point, dt, height):
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
         INSERT OR REPLACE INTO tides
         (point, datetime, height)
         VALUES (?, ?, ?)
     """, (point, dt, height))
-
     conn.commit()
     conn.close()
     
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
     CREATE TABLE IF NOT EXISTS tides (
         point TEXT,
@@ -50,24 +55,34 @@ def init_db():
         PRIMARY KEY(point, datetime)
     )
     """)
-
     conn.commit()
     conn.close()
 
-
-def save_tide(point, dt, height):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT OR REPLACE INTO tides
-        (point, datetime, height)
-        VALUES (?, ?, ?)
-    """, (point, dt, height))
-
-    conn.commit()
-    conn.close()
-
+def current_files():
+    year = datetime.utcnow().year
+    return [
+        f"data/{year}_kure.json",
+        f"data/{year+1}_kure.json",
+        f"data/{year+2}_kure.json",
+    ]
+    
+def save_year_data(name, data):
+    path = f"data/{name}.json"
+    with open(path, "w") as f:
+        json.dump(data, f, ensure_ascii=False)
+# =========================
+# 年データ取得＆保存
+# =========================
+def fetch_and_save_year(point, year):
+    # 気象庁から取得
+    # JSON作成
+    data = {
+        "point": point,
+        "year": year,
+        "items": []
+    }
+    save_year_data(f"{year}_{point}", data)
+    
 app = FastAPI()
 
 # =========================
@@ -335,9 +350,31 @@ def update_umishiru_background(areaCode):
 @app.on_event("startup")
 def startup():
     init_db()
-    
-    threading.Thread(target=load_hycom, daemon=True).start()
-
+    os.makedirs("data", exist_ok=True)
+    year = datetime.utcnow().year
+    points = [
+        "kure",
+        "hiroshima",
+        "onomichi"
+    ]
+    # =========================
+    # 年データ生成
+    # =========================
+    for point in points:
+        for y in [year-1, year, year+1]:
+            path = f"data/{y}_{point}.json"
+            if not os.path.exists(path):
+                fetch_and_save_year(point, y)
+    # =========================
+    # HYCOM
+    # =========================
+    threading.Thread(
+        target=load_hycom,
+        daemon=True
+    ).start()
+    # =========================
+    # 海しる warmup
+    # =========================
     try:
         threading.Thread(
             target=update_umishiru_background,
@@ -401,7 +438,8 @@ def current(lat: float = Query(...), lon: float = Query(...)):
     
 @app.get("/tide")
 def get_tide(point: str):
-    cur = tide_conn.cursor()
+    conn = get_conn()
+    cur = conn.cursor()
 
     rows = cur.execute("""
         SELECT datetime, height
@@ -410,6 +448,8 @@ def get_tide(point: str):
         ORDER BY datetime DESC
         LIMIT 100
     """, (point,)).fetchall()
+
+    conn.close()
 
     return {
         "status": "success",
@@ -423,10 +463,37 @@ def get_tide(point: str):
 def umishiru_forecast(areaCode: str):
     return get_umishiru(areaCode)
 
+# =========================
 
+# 年間潮汐データ
+
+# =========================
+
+@app.get("/tide/year")
+
+def tide_year(point: str, year: int):
+
+    path = f"data/{year}_{point}.json"
+
+    if not os.path.exists(path):
+
+        return {"status": "error"}
+
+    with open(path, "r") as f:
+
+        data = json.load(f)
+
+    return {
+
+        "status": "success",
+
+        "data": data
+
+   }
 # =========================
 # 起動
 # =========================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
