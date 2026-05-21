@@ -74,11 +74,15 @@ def save_year_data(name, data):
 # 年データ取得＆保存
 # =========================
 def fetch_and_save_year(point, year):
-    current = datetime(year, 1, 1)
-    while current.year == year:
-    fetch_jma_tide(point, current)
 
-    current += timedelta(hours=1)
+    current = datetime(year, 1, 1)
+
+    while current.year == year:
+
+        fetch_jma_tide(point, current)
+
+        current += timedelta(hours=1)
+
     conn = get_conn()
     cur = conn.cursor()
 
