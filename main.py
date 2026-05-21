@@ -348,14 +348,16 @@ def umishiru_forecast(areaCode: str):
     """海しるAPIから潮流予測を取得"""
     return get_umishiru(areaCode)
 
-@app.get("/tide")
-def get_tide(point: str):
+@app.get("/tide") # 🎯 URLを「/tide」に指定！
+def get_tide(point: str): # 🎯 関数名もこれに統一！
     """
     カレンダー特化型API（過去半年 + 当年1年分 + 来年半年 = 計2年分を返却）
     年が変わると自動的に取得範囲がスライドし、必要なデータを気象庁から自動同期します。
     """
     now = datetime.utcnow()
     current_year = now.year
+    
+    # --- 以下、送っていただいた2年分の完璧なロジックが続く ---
 
     # 1. 地点記号の表記揺れ（kure / Q9 など）を大文字の正式コードに統一
     station_map = {"kure": "Q9", "tokyo": "TK", "osaka": "OS"}
