@@ -33,6 +33,8 @@ def get_conn():
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
+    # 🎯 一度テーブルを完全に削除して、ゴミデータをクリアする
+    cur.execute("DROP TABLE IF EXISTS tides")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS tides (
         point TEXT,
