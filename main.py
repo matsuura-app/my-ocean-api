@@ -23,7 +23,7 @@ def load_year_data(point, year):
         return None
     with open(path, "r") as f:
         return json.load(f)
-        return json.load(f)
+        
 def get_conn():
     conn = sqlite3.connect(
         "tides.db",
