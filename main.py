@@ -74,14 +74,40 @@ def save_year_data(name, data):
 # 年データ取得＆保存
 # =========================
 def fetch_and_save_year(point, year):
-    # 気象庁から取得
-    # JSON作成
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    start = f"{year}-01-01 00:00:00"
+    end = f"{year}-12-31 23:59:59"
+
+    rows = cur.execute("""
+        SELECT datetime, height
+        FROM tides
+        WHERE point = ?
+        AND datetime BETWEEN ? AND ?
+        ORDER BY datetime ASC
+    """, (point, start, end)).fetchall()
+
+    conn.close()
+
+    items = []
+
+    for r in rows:
+        items.append({
+            "time": r["datetime"],
+            "height": r["height"]
+        })
+
     data = {
         "point": point,
         "year": year,
-        "items": []
+        "items": items
     }
+
     save_year_data(f"{year}_{point}", data)
+
+    print(f"SAVED {point} {year}: {len(items)} items")
     
 app = FastAPI()
 
