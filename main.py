@@ -74,7 +74,11 @@ def save_year_data(name, data):
 # 年データ取得＆保存
 # =========================
 def fetch_and_save_year(point, year):
+    current = datetime(year, 1, 1)
+    while current.year == year:
+    fetch_jma_tide(point, current)
 
+    current += timedelta(hours=1)
     conn = get_conn()
     cur = conn.cursor()
 
@@ -278,7 +282,6 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
 def fetch_umishiru_hour(area_code, hour):
 
     try:
-        # 今日0時UTC
         base = datetime.utcnow().replace(
             hour=0,
             minute=0,
@@ -310,21 +313,6 @@ def fetch_umishiru_hour(area_code, hour):
 
         p = features[0]["properties"]
 
-        print("DEBUG properties:", p)
-
-        height = p.get("tideHeightCm")
-
-        if height is None:
-            height = p.get("tideHeight")
-
-        if height is None:
-            print("潮位なし")
-            return None
-
-        jst_time = (target + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
-
-        save_tide(area_code, jst_time, height)
-       
         return {
             "time": hour,
             "speed": p.get("currentSpeedKt", 0.0),
@@ -334,7 +322,6 @@ def fetch_umishiru_hour(area_code, hour):
     except Exception as e:
         print("umishiru error:", e)
         return None
-
 
 def fetch_48h(area_code):
 
@@ -351,7 +338,42 @@ def fetch_48h(area_code):
 
     return {"status": "success", "data": filtered}
 
+# =========================
+# 気象庁 潮位取得
+# =========================
+def fetch_jma_tide(point_code, target):
 
+    try:
+
+        time_string = target.strftime("%Y%m%d%H%M")
+
+        url = (
+            "https://www.data.jma.go.jp/kaiyou/data/db/tide/suisan/"
+            f"{point_code}/{time_string}.json"
+        )
+
+        r = requests.get(url, timeout=15)
+
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+
+        height = data.get("height")
+
+        if height is None:
+            return None
+
+        jst_time = target.strftime("%Y-%m-%d %H:%M:%S")
+
+        save_tide(point_code, jst_time, height)
+
+        return True
+
+    except Exception as e:
+        print("jma error:", e)
+        return None
+        
 # =========================
 # 海しるバックグラウンド更新
 # =========================
