@@ -309,13 +309,17 @@ def fetch_umishiru_hour(area_code, hour):
             return None
 
         p = features[0]["properties"]
+
         print("DEBUG properties:", p)
 
-        height = (
-            p.get("tideHeightCm")
-            or p.get("tideHeight")
-            or 0.0
-        )
+        height = p.get("tideHeightCm")
+
+        if height is None:
+            height = p.get("tideHeight")
+
+        if height is None:
+            print("潮位なし")
+            return None
 
         jst_time = (target + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
 
