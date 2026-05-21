@@ -309,6 +309,7 @@ def fetch_umishiru_hour(area_code, hour):
             return None
 
         p = features[0]["properties"]
+        print("DEBUG properties:", p)
 
         height = (
             p.get("tideHeightCm")
