@@ -351,12 +351,10 @@ def update_umishiru_background(areaCode):
 def startup():
     init_db()
     os.makedirs("data", exist_ok=True)
-    year = datetime.utcnow().year
-    points = [
-        "kure",
-        "hiroshima",
-        "onomichi"
-    ]
+    threading.Thread(
+        target=load_hycom,
+        daemon=True
+    ).start()
     # =========================
     # 年データ生成
     # =========================
@@ -470,26 +468,27 @@ def umishiru_forecast(areaCode: str):
 # =========================
 
 @app.get("/tide/year")
-
 def tide_year(point: str, year: int):
 
     path = f"data/{year}_{point}.json"
 
+    # ファイル無ければ生成
+    if not os.path.exists(path):
+
+        fetch_and_save_year(point, year)
+
+    # 生成失敗
     if not os.path.exists(path):
 
         return {"status": "error"}
 
     with open(path, "r") as f:
-
         data = json.load(f)
 
     return {
-
         "status": "success",
-
         "data": data
-
-   }
+    }
 # =========================
 # 起動
 # =========================
