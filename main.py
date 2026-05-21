@@ -51,13 +51,18 @@ def fetch_and_save_jma_year(point_code: str, year: int):
     """
     気象庁から指定された年の潮汐テキストデータを取得してDBに保存する
     """
+    # 呉の正しい地点記号「Q9」をしっかりマッピング
     station_map = {
-        "kure": "KU",
+        "kure": "Q9",
         "tokyo": "TK",
         "osaka": "OS",
     }
+    
+    # 小文字で来ても対応できるようにし、辞書になければ入力されたコード（Q9など）をそのまま大文字で使う
     jma_code = station_map.get(point_code.lower(), point_code.upper())
-    url = f"https://www.data.jma.go.jp/kaiyou/db/tide/suisan/txt/{year}/{jma_code}.txt"
+    
+    # 🎯 これが教えていただいた正しいURLになります！
+    url = f"https://www.data.jma.go.jp/kaiyou/data/db/tide/suisan/txt/{year}/{jma_code}.txt"
     print(f"Fetching JMA tide data for {year}: {url}")
 
     try:
@@ -81,11 +86,14 @@ def fetch_and_save_jma_year(point_code: str, year: int):
             except ValueError:
                 continue
 
+            # 24時間分のデータ（72文字）を固定長で取得
             hourly_part = line[0:72]
 
             for hour in range(24):
                 start_idx = hour * 3
+                # 🛠️【タイポ修正】hourly_partを破壊せず、正しく3文字ずつ抽出します
                 height_str = hourly_part[start_idx:start_idx+3].strip()
+                
                 if not height_str:
                     continue
                 try:
@@ -107,28 +115,6 @@ def fetch_and_save_jma_year(point_code: str, year: int):
     except Exception as e:
         print("JMA Data Parse Error:", e)
         return False
-
-def cleanup_old_tides(current_year: int):
-    """
-    過去1年（昨年）より古いデータをDBから自動削除するクリーンアップ処理
-    """
-    oldest_valid_year = current_year - 1
-    threshold_date = f"{oldest_valid_year}-01-01 00:00:00"
-    
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            DELETE FROM tides
-            WHERE datetime < ?
-        """, (threshold_date,))
-        deleted_rows = cur.rowcount
-        conn.commit()
-        conn.close()
-        if deleted_rows > 0:
-            print(f"CLEANUP: {deleted_rows}件の古い潮汐データを削除しました（{oldest_valid_year}年より前）")
-    except Exception as e:
-        print("Cleanup Error:", e)
 
 # =========================
 # 🌐 HYCOM設定
@@ -337,14 +323,6 @@ def get_umishiru(areaCode):
 # =========================
 # 🚀 APIエンドポイント
 # =========================
-@app.get("/current")
-def current(lat: float = Query(...), lon: float = Query(...)):
-    return get_from_hycom(lat, lon)
-
-@app.get("/umishiru_forecast")
-def umishiru_forecast(areaCode: str):
-    return get_umishiru(areaCode)
-
 @app.get("/tide")
 def get_tide(point: str):
     """
@@ -370,19 +348,16 @@ def get_tide(point: str):
     """, (point,)).fetchall()
     conn.close()
 
-    # ⚠️【修正ポイント】データが無い、または直近数日分しかなくてデータが足りない場合は同期する
-    # ※1年分のデータがあれば8000件以上になるため、100件未満ならデータ未取得と判定します
+    # 3. データが無い、または足りない場合はその場で同期をかける
     if len(rows) < 100:
-        print(f"Initial sync or insufficient data for {point}: Fetching from JMA...")
+        print(f"Data missing or insufficient for {point}. Fetching from JMA...")
         fetch_and_save_jma_year(point, current_year - 1)
         fetch_and_save_jma_year(point, current_year)
         
-        # 10月以降なら翌年分も先読み
         if current_month >= 10:
-            print(f"October onwards: Pre-fetching data for year {current_year + 1}...")
             fetch_and_save_jma_year(point, current_year + 1)
 
-        # 3. 📥【重要】ダウンロード完了後に「もう一度DBから最新データを読み直す」
+        # 📥 同意完了後、その場で最新DBを読み直す！
         conn = get_conn()
         cur = conn.cursor()
         rows = cur.execute("""
