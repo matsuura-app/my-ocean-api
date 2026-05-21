@@ -51,17 +51,12 @@ def fetch_and_save_jma_year(point_code: str, year: int):
     """
     気象庁から指定された年の潮汐テキストデータを取得してDBに保存する
     """
-    # 呉の正しい地点記号「Q9」をしっかりマッピング
     station_map = {
         "kure": "Q9",
         "tokyo": "TK",
         "osaka": "OS",
     }
-    
-    # 小文字で来ても対応できるようにし、辞書になければ入力されたコード（Q9など）をそのまま大文字で使う
     jma_code = station_map.get(point_code.lower(), point_code.upper())
-    
-    # 🎯 これが教えていただいた正しいURLになります！
     url = f"https://www.data.jma.go.jp/kaiyou/data/db/tide/suisan/txt/{year}/{jma_code}.txt"
     print(f"Fetching JMA tide data for {year}: {url}")
 
@@ -86,14 +81,11 @@ def fetch_and_save_jma_year(point_code: str, year: int):
             except ValueError:
                 continue
 
-            # 24時間分のデータ（72文字）を固定長で取得
             hourly_part = line[0:72]
 
             for hour in range(24):
                 start_idx = hour * 3
-                # 🛠️【タイポ修正】hourly_partを破壊せず、正しく3文字ずつ抽出します
                 height_str = hourly_part[start_idx:start_idx+3].strip()
-                
                 if not height_str:
                     continue
                 try:
@@ -115,6 +107,28 @@ def fetch_and_save_jma_year(point_code: str, year: int):
     except Exception as e:
         print("JMA Data Parse Error:", e)
         return False
+
+def cleanup_old_tides(current_year: int):
+    """
+    過去1年（昨年）より古いデータをDBから自動削除するクリーンアップ処理
+    """
+    oldest_valid_year = current_year - 1
+    threshold_date = f"{oldest_valid_year}-01-01 00:00:00"
+    
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            DELETE FROM tides
+            WHERE datetime < ?
+        """, (threshold_date,))
+        deleted_rows = cur.rowcount
+        conn.commit()
+        conn.close()
+        if deleted_rows > 0:
+            print(f"CLEANUP: {deleted_rows}件の古い潮汐データを削除しました（{oldest_valid_year}年より前）")
+    except Exception as e:
+        print("Cleanup Error:", e)
 
 # =========================
 # 🌐 HYCOM設定
@@ -149,7 +163,7 @@ lock = threading.Lock()
 CACHE_TTL = 1800  # 30分
 
 # =========================
-# 🌊 HYCOM現在流
+# 🌊 HYCOM現在流計算ロジック
 # =========================
 def get_from_hycom(lat, lon):
     if not hycom_ready or ds_local is None:
@@ -179,65 +193,7 @@ def get_from_hycom(lat, lon):
         return {"status": "error", "message": str(e)}
 
 # =========================
-# 📈 HYCOM 48時間予報
-# =========================
-@app.get("/forecast")
-def forecast(lat: float = Query(...), lon: float = Query(...)):
-    if not hycom_ready or ds_local is None:
-        return {"status": "loading", "data": []}
-
-    key = f"{round(lat,2)}_{round(lon,2)}"
-    now = datetime.utcnow().timestamp()
-
-    if key in forecast_cache:
-        cached = forecast_cache[key]
-        if now - cached["time"] < CACHE_TTL:
-            return cached["data"]
-
-    try:
-        point = ds_local.sel(lat=lat, lon=lon, method="nearest")
-        results = []
-        utc_now = datetime.utcnow()
-        base_utc = utc_now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-        hycom_start = datetime(2000, 1, 1)
-        first_time = float(ds_local["time"].values[0])
-        first_datetime = hycom_start + timedelta(hours=first_time)
-        offset_hours = int((base_utc - first_datetime).total_seconds() / 3600)
-
-        for h in range(48):
-            idx = offset_hours + h
-            subset = point.isel(time=idx)
-            if "depth" in subset.dims:
-                subset = subset.isel(depth=0)
-
-            u = float(subset["water_u"].values)
-            v = float(subset["water_v"].values)
-
-            if np.isnan(u) or np.isnan(v):
-                results.append({"time": h, "speed": 0.0, "direction": 0.0})
-                continue
-
-            results.append({
-                "time": h,
-                "speed": round(np.sqrt(u**2 + v**2) * 1.94384, 2),
-                "direction": round((np.degrees(np.arctan2(v, u)) + 360) % 360, 1)
-            })
-
-        response = {"status": "success", "data": results}
-
-        with lock:
-            if len(forecast_cache) > 200:
-                while len(forecast_cache) > 150:
-                    forecast_cache.pop(next(iter(forecast_cache)), None)
-
-        forecast_cache[key] = {"time": now, "data": response}
-        return response
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# =========================
-# 🛳️ 海しる潮流API関連
+# 🛳️ 海しる潮流データ取得ロジック
 # =========================
 def fetch_umishiru_hour(area_code, hour):
     try:
@@ -321,13 +277,79 @@ def get_umishiru(areaCode):
         cache["building"] = False
 
 # =========================
-# 🚀 APIエンドポイント
+# 🚀 APIエンドポイント一覧
 # =========================
+
+@app.get("/current")
+def current(lat: float = Query(...), lon: float = Query(...)):
+    """HYCOMから現在の流向・流速を取得"""
+    return get_from_hycom(lat, lon)
+
+@app.get("/forecast")
+def forecast(lat: float = Query(...), lon: float = Query(...)):
+    """HYCOMから48時間分の潮流予測を取得"""
+    if not hycom_ready or ds_local is None:
+        return {"status": "loading", "data": []}
+
+    key = f"{round(lat,2)}_{round(lon,2)}"
+    now = datetime.utcnow().timestamp()
+
+    if key in forecast_cache:
+        cached = forecast_cache[key]
+        if now - cached["time"] < CACHE_TTL:
+            return cached["data"]
+
+    try:
+        point = ds_local.sel(lat=lat, lon=lon, method="nearest")
+        results = []
+        utc_now = datetime.utcnow()
+        base_utc = utc_now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        hycom_start = datetime(2000, 1, 1)
+        first_time = float(ds_local["time"].values[0])
+        first_datetime = hycom_start + timedelta(hours=first_time)
+        offset_hours = int((base_utc - first_datetime).total_seconds() / 3600)
+
+        for h in range(48):
+            idx = offset_hours + h
+            subset = point.isel(time=idx)
+            if "depth" in subset.dims:
+                subset = subset.isel(depth=0)
+
+            u = float(subset["water_u"].values)
+            v = float(subset["water_v"].values)
+
+            if np.isnan(u) or np.isnan(v):
+                results.append({"time": h, "speed": 0.0, "direction": 0.0})
+                continue
+
+            results.append({
+                "time": h,
+                "speed": round(np.sqrt(u**2 + v**2) * 1.94384, 2),
+                "direction": round((np.degrees(np.arctan2(v, u)) + 360) % 360, 1)
+            })
+
+        response = {"status": "success", "data": results}
+
+        with lock:
+            if len(forecast_cache) > 200:
+                while len(forecast_cache) > 150:
+                    forecast_cache.pop(next(iter(forecast_cache)), None)
+
+        forecast_cache[key] = {"time": now, "data": response}
+        return response
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/umishiru_forecast")
+def umishiru_forecast(areaCode: str):
+    """海しるAPIから潮流予測を取得"""
+    return get_umishiru(areaCode)
+
 @app.get("/tide")
 def get_tide(point: str):
     """
-    潮汐データ取得API
-    過去1年、今年、10月以降は翌年の3年分を自動管理
+    気象庁データから潮汐を取得 (過去1年、今年、10月以降は翌年の3年分を自動管理)
     """
     now = datetime.utcnow()
     current_year = now.year
@@ -357,7 +379,7 @@ def get_tide(point: str):
         if current_month >= 10:
             fetch_and_save_jma_year(point, current_year + 1)
 
-        # 📥 同意完了後、その場で最新DBを読み直す！
+        # 同期完了後、その場で最新DBを読み直す
         conn = get_conn()
         cur = conn.cursor()
         rows = cur.execute("""
