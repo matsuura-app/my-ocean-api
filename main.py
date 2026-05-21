@@ -108,9 +108,8 @@ def fetch_and_save_year(point, year):
     save_year_data(f"{year}_{point}", data)
 
     print(f"SAVED {point} {year}: {len(items)} items")
-    
-app = FastAPI()
 
+app = FastAPI()
 # =========================
 # HYCOM設定
 # =========================
