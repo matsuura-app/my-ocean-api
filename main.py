@@ -374,20 +374,11 @@ def update_umishiru_background(areaCode):
 # =========================
 @app.on_event("startup")
 def startup():
+
     init_db()
+
     os.makedirs("data", exist_ok=True)
-    threading.Thread(
-        target=load_hycom,
-        daemon=True
-    ).start()
-    # =========================
-    # 年データ生成
-    # =========================
-    for point in points:
-        for y in [year-1, year, year+1]:
-            path = f"data/{y}_{point}.json"
-            if not os.path.exists(path):
-                fetch_and_save_year(point, y)
+
     # =========================
     # HYCOM
     # =========================
@@ -395,6 +386,7 @@ def startup():
         target=load_hycom,
         daemon=True
     ).start()
+
     # =========================
     # 海しる warmup
     # =========================
@@ -404,6 +396,7 @@ def startup():
             args=("default",),
             daemon=True
         ).start()
+
     except Exception as e:
         print("warmup failed:", e)
 # =========================
