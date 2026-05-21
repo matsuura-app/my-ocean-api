@@ -365,14 +365,15 @@ def get_tide(point: str):
         SELECT datetime, height
         FROM tides
         WHERE point = ?
-        ORDER BY datetime DESC
+        ORDER BY datetime ASC
         LIMIT 100
     """, (point,)).fetchall()
     conn.close()
 
-    # 3. DBにデータが無い場合の初回一括同期
-    if not rows:
-        print(f"Initial sync for {point}: Fetching last year and current year...")
+    # ⚠️【修正ポイント】データが無い、または直近数日分しかなくてデータが足りない場合は同期する
+    # ※1年分のデータがあれば8000件以上になるため、100件未満ならデータ未取得と判定します
+    if len(rows) < 100:
+        print(f"Initial sync or insufficient data for {point}: Fetching from JMA...")
         fetch_and_save_jma_year(point, current_year - 1)
         fetch_and_save_jma_year(point, current_year)
         
@@ -381,14 +382,14 @@ def get_tide(point: str):
             print(f"October onwards: Pre-fetching data for year {current_year + 1}...")
             fetch_and_save_jma_year(point, current_year + 1)
 
-        # 再度DBから読み直し
+        # 3. 📥【重要】ダウンロード完了後に「もう一度DBから最新データを読み直す」
         conn = get_conn()
         cur = conn.cursor()
         rows = cur.execute("""
             SELECT datetime, height
             FROM tides
             WHERE point = ?
-            ORDER BY datetime DESC
+            ORDER BY datetime ASC
             LIMIT 100
         """, (point,)).fetchall()
         conn.close()
