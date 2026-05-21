@@ -94,15 +94,17 @@ def fetch_and_save_jma_year(point_code: str, year: int):
                     continue
 
                 dt_str = f"{line_year}-{line_month:02d}-{line_day:02d} {hour:02d}:00:00"
+                
+                # 🎯【修正完了】point_codeの代わりに、統一されたjma_codeでDBに保存します
                 cur.execute("""
                     INSERT OR REPLACE INTO tides (point, datetime, height)
                     VALUES (?, ?, ?)
-                """, (point_code, dt_str, height))
+                """, (jma_code, dt_str, height))
                 saved_count += 1
 
         conn.commit()
         conn.close()
-        print(f"SUCCESS: Saved {saved_count} items for {point_code} ({year})")
+        print(f"SUCCESS: Saved {saved_count} items for {jma_code} ({year})")
         return True
     except Exception as e:
         print("JMA Data Parse Error:", e)
@@ -349,50 +351,63 @@ def umishiru_forecast(areaCode: str):
 @app.get("/tide")
 def get_tide(point: str):
     """
-    気象庁データから潮汐を取得 (過去1年、今年、10月以降は翌年の3年分を自動管理)
+    カレンダー特化型API（過去半年 + 当年1年分 + 来年半年 = 計2年分を返却）
+    年が変わると自動的に取得範囲がスライドし、必要なデータを気象庁から自動同期します。
     """
     now = datetime.utcnow()
     current_year = now.year
-    current_month = now.month
 
-    # 1. 古いデータの自動削除
+    # 1. 地点記号の表記揺れ（kure / Q9 など）を大文字の正式コードに統一
+    station_map = {"kure": "Q9", "tokyo": "TK", "osaka": "OS"}
+    jma_code = station_map.get(point.lower(), point.upper())
+
+    # 2. 古いデータの自動削除（一昨年より古いデータをクリーンアップ）
     cleanup_old_tides(current_year)
 
-    # 2. DBからデータを検索
+    # 📅「過去半年（6ヶ月前）」と「来年半年（18ヶ月後）」の範囲を正確に計算
+    start_date_dt = now - timedelta(days=180)
+    end_date_dt = now + timedelta(days=180 + 365)
+
+    start_date_str = start_date_dt.strftime("%Y-%m-%d 00:00:00")
+    end_date_str = end_date_dt.strftime("%Y-%m-%d 23:59:59")
+
+    # 3. DBから指定期間のデータをソートして取得
     conn = get_conn()
     cur = conn.cursor()
     rows = cur.execute("""
         SELECT datetime, height
         FROM tides
-        WHERE point = ?
+        WHERE point = ? AND datetime BETWEEN ? AND ?
         ORDER BY datetime ASC
-        LIMIT 100
-    """, (point,)).fetchall()
+    """, (jma_code, start_date_str, end_date_str)).fetchall()
     conn.close()
 
-    # 3. データが無い、または足りない場合はその場で同期をかける
-    if len(rows) < 100:
-        print(f"Data missing or insufficient for {point}. Fetching from JMA...")
-        fetch_and_save_jma_year(point, current_year - 1)
-        fetch_and_save_jma_year(point, current_year)
+    # 4. データ件数が足りない（15000件未満）場合は、気象庁から3年分を同期
+    if len(rows) < 15000:
+        print(f"Data for {jma_code} is insufficient for the 2-year range. Syncing 3 years from JMA...")
         
-        if current_month >= 10:
-            fetch_and_save_jma_year(point, current_year + 1)
+        fetch_and_save_jma_year(jma_code, current_year - 1)
+        fetch_and_save_jma_year(jma_code, current_year)
+        fetch_and_save_jma_year(jma_code, current_year + 1)
 
-        # 同期完了後、その場で最新DBを読み直す
+        # 同期完了後、再読み込み
         conn = get_conn()
         cur = conn.cursor()
         rows = cur.execute("""
             SELECT datetime, height
             FROM tides
-            WHERE point = ?
+            WHERE point = ? AND datetime BETWEEN ? AND ?
             ORDER BY datetime ASC
-            LIMIT 100
-        """, (point,)).fetchall()
+        """, (jma_code, start_date_str, end_date_str)).fetchall()
         conn.close()
 
     return {
         "status": "success",
+        "point": jma_code,
+        "current_time_utc": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "range_start": start_date_str,
+        "range_end": end_date_str,
+        "total_records": len(rows),
         "data": [
             {"time": r["datetime"], "height": r["height"]}
             for r in rows
