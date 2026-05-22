@@ -33,8 +33,7 @@ def get_conn():
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
-    # 🎯 一度テーブルを完全に削除して、ゴミデータをクリアする
-    cur.execute("DROP TABLE IF EXISTS tides")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS tides (
         point TEXT,
@@ -43,6 +42,7 @@ def init_db():
         PRIMARY KEY(point, datetime)
     )
     """)
+
     conn.commit()
     conn.close()
 
@@ -385,7 +385,7 @@ def get_tide(point: str):
     conn.close()
 
     # 4. データ件数が足りない場合は、気象庁から3年分を同期
-    if len(rows) < 15000:
+    if len(rows) < 17000:
         print(f"Data for {jma_code} is insufficient. Syncing from JMA...")
         fetch_and_save_jma_year(jma_code, current_year - 1)
         fetch_and_save_jma_year(jma_code, current_year)
