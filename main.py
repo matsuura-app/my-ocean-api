@@ -33,7 +33,6 @@ def get_conn():
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
     CREATE TABLE IF NOT EXISTS tides (
         point TEXT,
@@ -42,7 +41,6 @@ def init_db():
         PRIMARY KEY(point, datetime)
     )
     """)
-
     conn.commit()
     conn.close()
 
@@ -350,28 +348,32 @@ def umishiru_forecast(areaCode: str):
     """海しるAPIから潮流予測を取得"""
     return get_umishiru(areaCode)
 
-@app.get("/tide")
-def get_tide(point: str):
+@app.get("/tide") # 🎯 URLを「/tide」に指定！
+def get_tide(point: str): # 🎯 関数名もこれに統一！
     """
     カレンダー特化型API（過去半年 + 当年1年分 + 来年半年 = 計2年分を返却）
-    データが足りない場合はバックグラウンドで気象庁と同期し、タイムアウトを防ぎます。
+    年が変わると自動的に取得範囲がスライドし、必要なデータを気象庁から自動同期します。
     """
     now = datetime.utcnow()
     current_year = now.year
+    
+    # --- 以下、送っていただいた2年分の完璧なロジックが続く ---
 
+    # 1. 地点記号の表記揺れ（kure / Q9 など）を大文字の正式コードに統一
     station_map = {"kure": "Q9", "tokyo": "TK", "osaka": "OS"}
     jma_code = station_map.get(point.lower(), point.upper())
 
-    # 古いデータの自動削除
+    # 2. 古いデータの自動削除（一昨年より古いデータをクリーンアップ）
     cleanup_old_tides(current_year)
 
+    # 📅「過去半年（6ヶ月前）」と「来年半年（18ヶ月後）」の範囲を正確に計算
     start_date_dt = now - timedelta(days=180)
     end_date_dt = now + timedelta(days=180 + 365)
 
     start_date_str = start_date_dt.strftime("%Y-%m-%d 00:00:00")
     end_date_str = end_date_dt.strftime("%Y-%m-%d 23:59:59")
 
-    # DBからデータを取得
+    # 3. DBから指定期間のデータをソートして取得
     conn = get_conn()
     cur = conn.cursor()
     rows = cur.execute("""
@@ -382,26 +384,31 @@ def get_tide(point: str):
     """, (jma_code, start_date_str, end_date_str)).fetchall()
     conn.close()
 
-    # 🎯 データの準備ができていない（空っぽ、または件数が大幅に足りない）場合
-    if len(rows) < 1000:
-        print(f"⚠️ {jma_code} のデータがDBにありません。バックグラウンドで気象庁から同期を開始します...")
+    # 4. データ件数が足りない（15000件未満）場合は、気象庁から3年分を同期
+    if len(rows) < 15000:
+        print(f"Data for {jma_code} is insufficient for the 2-year range. Syncing 3 years from JMA...")
         
-        # 💡 重い通信を別スレッド（バックグラウンド）で回し、FastAPI自体は即座に応答を返す
-        def sync_task():
-            fetch_and_save_jma_year(jma_code, current_year - 1)
-            fetch_and_save_jma_year(jma_code, current_year)
-            fetch_and_save_jma_year(jma_code, current_year + 1)
-            print(f"✅ {jma_code} の3年分データの同期が完了しました！")
+        fetch_and_save_jma_year(jma_code, current_year - 1)
+        fetch_and_save_jma_year(jma_code, current_year)
+        fetch_and_save_jma_year(jma_code, current_year + 1)
 
-        threading.Thread(target=sync_task, daemon=True).start()
+        # 同期完了後、再読み込み
+        conn = get_conn()
+        cur = conn.cursor()
+        rows = cur.execute("""
+            SELECT datetime, height
+            FROM tides
+            WHERE point = ? AND datetime BETWEEN ? AND ?
+            ORDER BY datetime ASC
+        """, (jma_code, start_date_str, end_date_str)).fetchall()
+        conn.close()
 
-        # Swift側が「null」と判定して、しばらくして自動再試行できるようにメッセージを返却
-        return "null"
-
-    # 通常通りデータが揃っている場合は、綺麗に整形して返却
     return {
         "status": "success",
         "point": jma_code,
+        "current_time_utc": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "range_start": start_date_str,
+        "range_end": end_date_str,
         "total_records": len(rows),
         "data": [
             {"time": r["datetime"], "height": r["height"]}
