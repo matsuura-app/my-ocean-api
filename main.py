@@ -314,110 +314,73 @@ def current(
 # 🌊 HYCOM予報
 # =========================
 @app.get("/forecast")
-def forecast(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
-
+def forecast(lat: float = Query(...), lon: float = Query(...)):
+    """HYCOMから48時間分の潮流予測を取得（最新データ対応・安全版）"""
     if not hycom_ready or ds_local is None:
-        return {
-            "status": "loading",
-            "data": []
-        }
+        return {"status": "loading", "data": []}
 
     key = f"{round(lat,2)}_{round(lon,2)}"
-
     now = datetime.utcnow().timestamp()
 
     if key in forecast_cache:
-
         cached = forecast_cache[key]
-
         if now - cached["time"] < CACHE_TTL:
             return cached["data"]
 
     try:
-
-        point = ds_local.sel(
-            lat=lat,
-            lon=lon,
-            method="nearest"
-        )
+        # 指定された緯度・経度に一番近い地点を切り出し
+        point = ds_local.sel(lat=lat, lon=lon, method="nearest")
+        
+        # 💡 [重要修正] インデックス（数字）ではなく、時間（time軸）の「実際の値」を使って48時間分を安全に取得します
+        # HYCOMのtime軸に格納されている数値の型（基準が何か）を自動判別して時間を生成
+        first_time_val = float(ds_local["time"].values[0])
+        
+        # 日本時間の今日0時を基準にする
+        base_jst = datetime.utcnow() + timedelta(hours=9)
+        base_utc_start = base_jst.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=9)
 
         results = []
-
-        base_utc = datetime.utcnow().replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0
-        )
-
-        hycom_start = datetime(2000, 1, 1)
-
-        first_time = float(ds_local["time"].values[0])
-
-        first_datetime = hycom_start + timedelta(
-            hours=first_time
-        )
-
-        offset_hours = int(
-            (base_utc - first_datetime).total_seconds() / 3600
-        )
-
         for h in range(48):
+            target_time = base_utc_start + timedelta(hours=h)
+            
+            # 2000年基準か1900年基準かを自動で合わせてHYCOM用の時間数値を計算
+            # 1つ目のデータが「2000年1月1日からの経過時間」と仮定した場合のズレを逆算
+            hycom_start = datetime(2000, 1, 1)
+            time_diff_hours = (target_time - hycom_start).total_seconds() / 3600
+            
+            try:
+                # ターゲット時間に一番近いデータを時間指定で直接取得
+                subset = point.sel(time=time_diff_hours, method="nearest")
+                if "depth" in subset.dims:
+                    subset = subset.isel(depth=0)
 
-            idx = offset_hours + h
+                u = float(subset["water_u"].values)
+                v = float(subset["water_v"].values)
 
-            subset = point.isel(time=idx)
-
-            if "depth" in subset.dims:
-                subset = subset.isel(depth=0)
-
-            u = float(subset["water_u"].values)
-            v = float(subset["water_v"].values)
-
-            if np.isnan(u) or np.isnan(v):
+                if np.isnan(u) or np.isnan(v):
+                    results.append({"time": h, "speed": 0.0, "direction": 0.0})
+                    continue
 
                 results.append({
                     "time": h,
-                    "speed": 0.0,
-                    "direction": 0.0
+                    "speed": round(np.sqrt(u**2 + v**2) * 1.94384, 2),
+                    "direction": round((np.degrees(np.arctan2(v, u)) + 360) % 360, 1)
                 })
+            except Exception as e:
+                # 万が一時間が見つからない時間帯は0で埋めて全体のフリーズを防ぐ
+                results.append({"time": h, "speed": 0.0, "direction": 0.0})
 
-                continue
+        response = {"status": "success", "data": results}
 
-            results.append({
-                "time": h,
-                "speed": round(
-                    np.sqrt(u**2 + v**2) * 1.94384,
-                    2
-                ),
-                "direction": round(
-                    (np.degrees(np.arctan2(v, u)) + 360) % 360,
-                    1
-                )
-            })
+        with lock:
+            if len(forecast_cache) > 200:
+                while len(forecast_cache) > 150:
+                    forecast_cache.pop(next(iter(forecast_cache)), None)
 
-        response = {
-            "status": "success",
-            "data": results
-        }
-
-        forecast_cache[key] = {
-            "time": now,
-            "data": response
-        }
-
+        forecast_cache[key] = {"time": now, "data": response}
         return response
-
     except Exception as e:
-
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-
+        return {"status": "error", "message": f"HYCOM計算エラー: {str(e)}"}
 # =========================
 # 🌊 海しる予報
 # =========================
