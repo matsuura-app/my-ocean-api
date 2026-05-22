@@ -350,25 +350,23 @@ def umishiru_forecast(areaCode: str):
     """海しるAPIから潮流予測を取得"""
     return get_umishiru(areaCode)
 
-@app.get("/tide") # 🎯 URLを「/tide」に指定！
-def get_tide(point: str): # 🎯 関数名もこれに統一！
+@app.get("/tide")
+def get_tide(point: str):
     """
     カレンダー特化型API（過去半年 + 当年1年分 + 来年半年 = 計2年分を返却）
     年が変わると自動的に取得範囲がスライドし、必要なデータを気象庁から自動同期します。
     """
     now = datetime.utcnow()
     current_year = now.year
-    
-    # --- 以下、送っていただいた2年分の完璧なロジックが続く ---
 
     # 1. 地点記号の表記揺れ（kure / Q9 など）を大文字の正式コードに統一
     station_map = {"kure": "Q9", "tokyo": "TK", "osaka": "OS"}
     jma_code = station_map.get(point.lower(), point.upper())
 
-    # 2. 古いデータの自動削除（一昨年より古いデータをクリーンアップ）
+    # 2. 古いデータの自動削除
     cleanup_old_tides(current_year)
 
-    # 📅「過去半年（6ヶ月前）」と「来年半年（18ヶ月後）」の範囲を正確に計算
+    # 「過去半年」と「来年半年」の範囲を正確に計算
     start_date_dt = now - timedelta(days=180)
     end_date_dt = now + timedelta(days=180 + 365)
 
@@ -386,10 +384,9 @@ def get_tide(point: str): # 🎯 関数名もこれに統一！
     """, (jma_code, start_date_str, end_date_str)).fetchall()
     conn.close()
 
-    # 4. データ件数が足りない（15000件未満）場合は、気象庁から3年分を同期
+    # 4. データ件数が足りない場合は、気象庁から3年分を同期
     if len(rows) < 15000:
-        print(f"Data for {jma_code} is insufficient for the 2-year range. Syncing 3 years from JMA...")
-        
+        print(f"Data for {jma_code} is insufficient. Syncing from JMA...")
         fetch_and_save_jma_year(jma_code, current_year - 1)
         fetch_and_save_jma_year(jma_code, current_year)
         fetch_and_save_jma_year(jma_code, current_year + 1)
@@ -408,9 +405,6 @@ def get_tide(point: str): # 🎯 関数名もこれに統一！
     return {
         "status": "success",
         "point": jma_code,
-        "current_time_utc": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "range_start": start_date_str,
-        "range_end": end_date_str,
         "total_records": len(rows),
         "data": [
             {"time": r["datetime"], "height": r["height"]}
