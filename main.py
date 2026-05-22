@@ -5,9 +5,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import threading
-import sqlite3
 import os
-import json
 
 # =========================
 # 🔑 環境変数
@@ -17,122 +15,6 @@ if API_KEY is None:
     print("WARNING: MSIL_API_KEY is not set")
 
 app = FastAPI()
-
-# =========================
-# 💾 データベース管理
-# =========================
-def get_conn():
-    conn = sqlite3.connect(
-        "tides.db",
-        timeout=10,
-        check_same_thread=False
-    )
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS tides (
-        point TEXT,
-        datetime TEXT,
-        height REAL,
-        PRIMARY KEY(point, datetime)
-    )
-    """)
-
-    conn.commit()
-    conn.close()
-
-# =========================
-# 🌊 気象庁 潮位取得・3年分管理ロジック
-# =========================
-def fetch_and_save_jma_year(point_code: str, year: int):
-    """
-    気象庁から指定された年の潮汐テキストデータを取得してDBに保存する
-    """
-    station_map = {
-        "kure": "Q9",
-        "tokyo": "TK",
-        "osaka": "OS",
-    }
-    jma_code = station_map.get(point_code.lower(), point_code.upper())
-    url = f"https://www.data.jma.go.jp/kaiyou/data/db/tide/suisan/txt/{year}/{jma_code}.txt"
-    print(f"Fetching JMA tide data for {year}: {url}")
-
-    try:
-        r = requests.get(url, timeout=15)
-        if r.status_code != 200:
-            print(f"JMA Error ({r.status_code}): データがまだ公開されていないか、コードが違います。")
-            return False
-
-        lines = r.text.splitlines()
-        conn = get_conn()
-        cur = conn.cursor()
-
-        saved_count = 0
-        for line in lines:
-            if len(line) < 72:
-                continue
-            try:
-                line_year = 2000 + int(line[72:74])
-                line_month = int(line[74:76])
-                line_day = int(line[76:78])
-            except ValueError:
-                continue
-
-            hourly_part = line[0:72]
-
-            for hour in range(24):
-                start_idx = hour * 3
-                height_str = hourly_part[start_idx:start_idx+3].strip()
-                if not height_str:
-                    continue
-                try:
-                    height = float(height_str)
-                except ValueError:
-                    continue
-
-                dt_str = f"{line_year}-{line_month:02d}-{line_day:02d} {hour:02d}:00:00"
-                
-                # 🎯【修正完了】point_codeの代わりに、統一されたjma_codeでDBに保存します
-                cur.execute("""
-                    INSERT OR REPLACE INTO tides (point, datetime, height)
-                    VALUES (?, ?, ?)
-                """, (jma_code, dt_str, height))
-                saved_count += 1
-
-        conn.commit()
-        conn.close()
-        print(f"SUCCESS: Saved {saved_count} items for {jma_code} ({year})")
-        return True
-    except Exception as e:
-        print("JMA Data Parse Error:", e)
-        return False
-
-def cleanup_old_tides(current_year: int):
-    """
-    過去1年（昨年）より古いデータをDBから自動削除するクリーンアップ処理
-    """
-    oldest_valid_year = current_year - 1
-    threshold_date = f"{oldest_valid_year}-01-01 00:00:00"
-    
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            DELETE FROM tides
-            WHERE datetime < ?
-        """, (threshold_date,))
-        deleted_rows = cur.rowcount
-        conn.commit()
-        conn.close()
-        if deleted_rows > 0:
-            print(f"CLEANUP: {deleted_rows}件の古い潮汐データを削除しました（{oldest_valid_year}年より前）")
-    except Exception as e:
-        print("Cleanup Error:", e)
 
 # =========================
 # 🌐 HYCOM設定
@@ -197,15 +79,14 @@ def get_from_hycom(lat, lon):
         return {"status": "error", "message": str(e)}
 
 # =========================
-# 🛳️ 海しる潮流データ取得ロジック
+# 🛳️ 海しる潮流データ取得ロジック（日本時間JST修正版）
 # =========================
 def fetch_umishiru_hour(area_code, hour):
     try:
-        # 🎯 UTCではなく、日本時間(JST)を基準にする（UTC+9時間）
-        # もしくは datetime.utcnow() + timedelta(hours=9)
+        # 🎯 日本時間(JST)の今日0時を基準にしてズレを防ぐ
         base_jst = datetime.utcnow() + timedelta(hours=9)
         base = base_jst.replace(hour=0, minute=0, second=0, microsecond=0)
-        
+
         target = base + timedelta(hours=hour)
         time_string = target.strftime("%Y%m%d%H%M")
 
@@ -233,6 +114,7 @@ def fetch_umishiru_hour(area_code, hour):
     except Exception as e:
         print("umishiru error:", e)
         return None
+
 def fetch_48h(area_code):
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(
@@ -252,7 +134,7 @@ def update_umishiru_background(areaCode):
         data = fetch_48h(areaCode)
         if data["status"] == "success":
             cache["last_good"] = data
-            cache["date"] = datetime.utcnow().date()
+            cache["date"] = (datetime.utcnow() + timedelta(hours=9)).date()
     finally:
         with lock:
             cache["updating"] = False
@@ -309,9 +191,9 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
     try:
         point = ds_local.sel(lat=lat, lon=lon, method="nearest")
         results = []
-        utc_now = datetime.utcnow()
-        base_utc = utc_now.replace(hour=0, minute=0, second=0, microsecond=0)
-
+        
+        # 基準時刻の計算
+        base_utc = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         hycom_start = datetime(2000, 1, 1)
         first_time = float(ds_local["time"].values[0])
         first_datetime = hycom_start + timedelta(hours=first_time)
@@ -353,73 +235,11 @@ def umishiru_forecast(areaCode: str):
     """海しるAPIから潮流予測を取得"""
     return get_umishiru(areaCode)
 
-@app.get("/tide")
-def get_tide(point: str):
-    """
-    カレンダー特化型API（過去半年 + 当年1年分 + 来年半年 = 計2年分を返却）
-    データが足りない場合はバックグラウンドで気象庁と同期し、タイムアウトを防ぎます。
-    """
-    now = datetime.utcnow()
-    current_year = now.year
-
-    station_map = {"kure": "Q9", "tokyo": "TK", "osaka": "OS"}
-    jma_code = station_map.get(point.lower(), point.upper())
-
-    # 古いデータの自動削除
-    cleanup_old_tides(current_year)
-
-    start_date_dt = now - timedelta(days=180)
-    end_date_dt = now + timedelta(days=180 + 365)
-
-    start_date_str = start_date_dt.strftime("%Y-%m-%d 00:00:00")
-    end_date_str = end_date_dt.strftime("%Y-%m-%d 23:59:59")
-
-    # DBからデータを取得
-    conn = get_conn()
-    cur = conn.cursor()
-    rows = cur.execute("""
-        SELECT datetime, height
-        FROM tides
-        WHERE point = ? AND datetime BETWEEN ? AND ?
-        ORDER BY datetime ASC
-    """, (jma_code, start_date_str, end_date_str)).fetchall()
-    conn.close()
-
-    # 🎯 データの準備ができていない（空っぽ、または件数が大幅に足りない）場合
-    if len(rows) < 1000:
-        print(f"⚠️ {jma_code} のデータがDBにありません。バックグラウンドで気象庁から同期を開始します...")
-        
-        # 💡 重い通信を別スレッド（バックグラウンド）で回し、FastAPI自体は即座に応答を返す
-        def sync_task():
-            fetch_and_save_jma_year(jma_code, current_year - 1)
-            fetch_and_save_jma_year(jma_code, current_year)
-            fetch_and_save_jma_year(jma_code, current_year + 1)
-            print(f"✅ {jma_code} の3年分データの同期が完了しました！")
-
-        threading.Thread(target=sync_task, daemon=True).start()
-
-        # Swift側が「null」と判定して、しばらくして自動再試行できるようにメッセージを返却
-        return "null"
-
-    # 通常通りデータが揃っている場合は、綺麗に整形して返却
-    return {
-        "status": "success",
-        "point": jma_code,
-        "total_records": len(rows),
-        "data": [
-            {"time": r["datetime"], "height": r["height"]}
-            for r in rows
-        ]
-    }
-
 # =========================
 # 🏁 起動処理
 # =========================
 @app.on_event("startup")
 def startup():
-    init_db()
-    os.makedirs("data", exist_ok=True)
-
     # HYCOMバックグラウンド読み込み
     threading.Thread(target=load_hycom, daemon=True).start()
 
