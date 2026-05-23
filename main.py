@@ -402,16 +402,20 @@ def get_umishiru(areaCode):
     # SQLiteキャッシュ
     # =========================
     cached_sqlite = load_umishiru_cache(areaCode)
-    if cached_sqlite:
+
+if cached_sqlite:
     cache["last_good"] = cached_sqlite
+
     with lock:
         if not cache.get("updating"):
             cache["updating"] = True
+
             threading.Thread(
                 target=update_umishiru_background,
                 args=(areaCode,),
                 daemon=True
             ).start()
+
     return cached_sqlite
     # =========================
     # メモリキャッシュ
@@ -478,38 +482,50 @@ def forecast(
     # SQLiteキャッシュ
     # =========================
     cached_sqlite = load_hycom_cache(key)
-    if cached_sqlite:
+
+if cached_sqlite:
     print("⚡ SQLite cache HIT")
+
     if key not in forecast_cache:
         forecast_cache[key] = {
             "time": now,
             "data": cached_sqlite,
             "updating": False
         }
+
     with lock:
         if not forecast_cache[key].get("updating"):
             forecast_cache[key]["updating"] = True
+
             threading.Thread(
                 target=refresh_forecast_background,
                 args=(lat, lon, key),
                 daemon=True
             ).start()
+
     return cached_sqlite
     # =========================
     # メモリキャッシュ
     # =========================
     if key in forecast_cache:
-        cached = forecast_cache[key]
-        if now - cached["time"] < CACHE_TTL:
-    with lock:
-        if not cached.get("updating"):
-            cached["updating"] = True
-            threading.Thread(
-                target=refresh_forecast_background,
-                args=(lat, lon, key),
-                daemon=True
-            ).start()
-    return cached["data"]
+
+    cached = forecast_cache[key]
+
+    if now - cached["time"] < CACHE_TTL:
+
+        with lock:
+
+            if not cached.get("updating"):
+
+                cached["updating"] = True
+
+                threading.Thread(
+                    target=refresh_forecast_background,
+                    args=(lat, lon, key),
+                    daemon=True
+                ).start()
+
+        return cached["data"]
     # =========================
     # 初回生成
     # =========================
