@@ -401,11 +401,11 @@ def get_umishiru(areaCode):
     # =========================
 # SQLiteキャッシュ
 # =========================
-cached_sqlite = load_umishiru_cache(areaCode)
+     cached_sqlite = load_umishiru_cache(areaCode)
 
-if cached_sqlite:
+     if cached_sqlite:
 
-    cache["last_good"] = cached_sqlite
+     cache["last_good"] = cached_sqlite
 
     with lock:
 
@@ -424,7 +424,7 @@ if cached_sqlite:
 # =========================
 # メモリキャッシュ
 # =========================
-if cache["last_good"]:
+    if cache["last_good"]:
 
     with lock:
 
@@ -490,9 +490,9 @@ def forecast(
     # =========================
 # SQLiteキャッシュ
 # =========================
-cached_sqlite = load_hycom_cache(key)
+    cached_sqlite = load_hycom_cache(key)
 
-if cached_sqlite:
+    if cached_sqlite:
 
     print("⚡ SQLite cache HIT")
 
