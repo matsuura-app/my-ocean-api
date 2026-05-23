@@ -136,32 +136,46 @@ def load_hycom():
 
 def generate_forecast(lat, lon):
     point = ds_local.sel(lat=lat, lon=lon, method="nearest")
-    base_jst = datetime.utcnow() + timedelta(hours=9)
-    base_utc_start = base_jst.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=9)
+    
+    # 💡 [絶対安全な方法] インデックスの数字を計算するのをやめて、
+    # HYCOMが持っている「実際の時間の配列」から、一番近い時間を直接検索させる
+    time_array = point["time"].values  # HYCOMが持っている全時間リスト
+    
+    now_jst = datetime.now(JST)
+    base_jst = now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
+    base_utc_start = base_jst.astimezone(timezone.utc)
+    hycom_base = datetime(2000, 1, 1, tzinfo=timezone.utc)
     
     results = []
     for h in range(48):
         target_time = base_utc_start + timedelta(hours=h)
-        hycom_start = datetime(2000, 1, 1)
-        time_diff_hours = (target_time - hycom_start).total_seconds() / 3600
+        target_hours_val = (target_time - hycom_base).total_seconds() / 3600.0
+        
         try:
-            subset = point.sel(time=time_diff_hours, method="nearest")
+            # 💡 計算した時間の値(target_hours_val)に一番近いデータを、
+            # time_arrayの範囲（0〜16809）の中から自動で安全に見つけ出します
+            subset = point.sel(time=target_hours_val, method="nearest")
+            
             if "depth" in subset.dims:
                 subset = subset.isel(depth=0)
+                
             u = float(subset["water_u"].values)
             v = float(subset["water_v"].values)
+            
             if np.isnan(u) or np.isnan(v):
                 results.append({"time": h, "speed": 0.0, "direction": 0.0})
                 continue
+                
             results.append({
                 "time": h,
                 "speed": round(np.sqrt(u**2 + v**2) * 1.94384, 2),
                 "direction": round((np.degrees(np.arctan2(v, u)) + 360) % 360, 1)
             })
-        except:
+        except Exception as e:
+            print(f"❌ Forecast loop error at hour {h}: {e}")
             results.append({"time": h, "speed": 0.0, "direction": 0.0})
+            
     return {"status": "success", "data": results}
-
 def refresh_forecast_background(lat, lon, key):
     try:
         print("🔄 background refresh:", key)
