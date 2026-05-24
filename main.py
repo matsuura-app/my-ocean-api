@@ -1,423 +1,223 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query  # 💡 from を小文字に修正
 import xarray as xr
 import numpy as np
 import requests
-import sqlite3
-import json
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
-import time
 import threading
 import os
+from datetime import datetime, timedelta, timezone
 
-# =========================
-# 🔑 環境変数
-# =========================
+# =====================================================
+# FastAPI / 環境変数
+# =====================================================
+app = FastAPI()
 API_KEY = os.getenv("MSIL_API_KEY")
 
-if API_KEY is None:
-    print("❌ WARNING: MSIL_API_KEY is not set")
-else:
-    print("✅ MSIL_API_KEY loaded")
-
-app = FastAPI()
-CACHE_TTL = 1800  # 30分
-
-# =========================
-# 💾 SQLite
-# =========================
-def init_db():
-    conn = sqlite3.connect("cache.db", check_same_thread=False)
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS hycom_cache (
-        cache_key TEXT PRIMARY KEY,
-        updated_at TEXT,
-        json TEXT
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS umishiru_cache (
-        cache_key TEXT PRIMARY KEY,
-        updated_at TEXT,
-        json TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
-
-def save_hycom_cache(key, data):
-    try:
-        conn = sqlite3.connect("cache.db", check_same_thread=False)
-        cur = conn.cursor()
-        cur.execute("""
-        INSERT OR REPLACE INTO hycom_cache (cache_key, updated_at, json)
-        VALUES (?, ?, ?)
-        """, (key, datetime.utcnow().isoformat(), json.dumps(data)))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print("❌ save_hycom_cache error:", e)
-    
-def load_hycom_cache(key):
-    try:
-        conn = sqlite3.connect("cache.db", check_same_thread=False)
-        cur = conn.cursor()
-        row = cur.execute("""
-        SELECT updated_at, json FROM hycom_cache WHERE cache_key = ?
-        """, (key,)).fetchone()
-        conn.close()
-        if not row:
-            return None
-        updated_at = datetime.fromisoformat(row[0])
-        if (datetime.utcnow() - updated_at).total_seconds() < CACHE_TTL:
-            return json.loads(row[1])
-    except Exception as e:
-        print("❌ load_hycom_cache error:", e)
-    return None
-    
-def save_umishiru_cache(key, data):
-    try:
-        conn = sqlite3.connect("cache.db", check_same_thread=False)
-        cur = conn.cursor()
-        cur.execute("""
-        INSERT OR REPLACE INTO umishiru_cache (cache_key, updated_at, json)
-        VALUES (?, ?, ?)
-        """, (key, datetime.utcnow().isoformat(), json.dumps(data)))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print("❌ save_umishiru_cache error:", e)
-
-def load_umishiru_cache(key):
-    try:
-        conn = sqlite3.connect("cache.db", check_same_thread=False)
-        cur = conn.cursor()
-        row = cur.execute("""
-        SELECT updated_at, json FROM umishiru_cache WHERE cache_key = ?
-        """, (key,)).fetchone()
-        conn.close()
-        if not row:
-            return None
-        updated_at = datetime.fromisoformat(row[0])
-        if (datetime.utcnow() - updated_at).total_seconds() < 86400:  # 24時間
-            return json.loads(row[1])
-    except Exception as e:
-        print("❌ load_umishiru_cache error:", e)
-    return None
-
-# =========================
-# 🌐 HYCOM設定
-# =========================
-DATA_URL = "https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0/uv3z"
-ds_local = None
-hycom_ready = False
+# =====================================================
+# 設定・タイムゾーン
+# =====================================================
 JST = timezone(timedelta(hours=9))
+RTOFS_TTL = 1800        # 30分
 
-# =========================
-# 🌊 HYCOM読み込み
-# =========================
-def load_hycom():
-    global ds_local, hycom_ready
-    print("🌊 HYCOM loading...")
-    try:
-        ds_local = xr.open_dataset(
-            DATA_URL,
-            engine="netcdf4",
-            decode_times=False
-        ).sel(
-            lat=slice(30, 46),
-            lon=slice(129, 146)
-        )
-        hycom_ready = True
-        print("✅ HYCOM ready")
-    except Exception as e:
-        print("❌ HYCOM load error:", e)
-
-def generate_forecast(lat, lon):
-    point = ds_local.sel(lat=lat, lon=lon, method="nearest")
-    base_jst = datetime.utcnow() + timedelta(hours=9)
-    base_utc_start = base_jst.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=9)
-    
-    results = []
-    for h in range(48):
-        target_time = base_utc_start + timedelta(hours=h)
-        results = []
-
-        times = ds_local["time"].values
-
-    for h in range(48):
-
-        try:
-
-            subset = point.isel(time=h)
-
-            if "depth" in subset.dims:
-                subset = subset.isel(depth=0)
-
-            u = float(subset["water_u"].values)
-            v = float(subset["water_v"].values)
-
-            if np.isnan(u) or np.isnan(v):
-                results.append({
-                    "time": h,
-                    "speed": 0.0,
-                    "direction": 0.0
-                })
-                continue
-
-            results.append({
-                "time": h,
-                "speed": round(
-                    np.sqrt(u**2 + v**2) * 1.94384,
-                    2
-                ),
-                "direction": round(
-                    (
-                        np.degrees(np.arctan2(v, u))
-                        + 360
-                    ) % 360,
-                    1
-                )
-            })
-
-        except Exception as e:
-
-            print("❌ forecast hour error:", h, e)
- 
-            results.append({
-                "time": h,
-                "speed": 0.0,
-                "direction": 0.0
-            })
-
-def refresh_forecast_background(lat, lon, key):
-    try:
-        print("🔄 background refresh:", key)
-        response = generate_forecast(lat, lon)
-        forecast_cache[key] = {
-            "time": datetime.utcnow().timestamp(),
-            "data": response,
-            "updating": False
-        }
-        save_hycom_cache(key, response)
-        print("✅ background updated")
-    except Exception as e:
-        print("❌ background refresh error:", e)
-    finally:
-        with lock:
-            if key in forecast_cache:
-                forecast_cache[key]["updating"] = False
-
-# =========================
-# 🧠 キャッシュ管理
-# =========================
 forecast_cache = {}
 umishiru_cache = {}
 lock = threading.Lock()
 
-# =========================
-# 🌊 HYCOM現在流
-# =========================
-def get_from_hycom(lat, lon):
-    if not hycom_ready or ds_local is None:
-        return {"status": "loading", "message": "HYCOM initializing"}
+# =====================================================
+# 🌐 NOAA RTOFS の「今日の日付」URLを動的に生成する関数
+# =====================================================
+def get_rtofs_url():
+    """
+    NOAAのサーバー仕様に合わせ、今日の日付のデータセットURLを自動生成します。
+    """
+    now_utc = datetime.utcnow()
+    # サーバーの更新ラグを考慮し、直近2日間の有効なURLを探索
+    for days_back in [0, 1, 2]:
+        target_date = now_utc - timedelta(days=days_back)
+        date_str = target_date.strftime("%Y%m%d")
+        url = f"http://nomads.ncep.noaa.gov:9090/dods/rtofs/rtofs_global{date_str}/rtofs_ge_2d_forecast"
+        
+        # 接続テスト (HEADリクエストでデータセットが存在するか1秒だけ確認)
+        try:
+            r = requests.head(url, timeout=1.5)
+            if r.status_code == 200:
+                return url
+        except Exception:
+            continue
+            
+    # 万が一のフォールバック用（固定リンク）
+    return "http://nomads.ncep.noaa.gov:9090/dods/rtofs/rtofs_global/rtofs_ge_2d_forecast"
+
+# =====================================================
+# 陸地を回避して最も近い「海」の座標を探すロジック (RTOFS仕様)
+# =====================================================
+def find_sea_point(ds, lat, lon):
+    offsets = [0, 0.04, -0.04, 0.08, -0.08]
+    for lat_off in offsets:
+        for lon_off in offsets:
+            try:
+                # 💡 RTOFSは軸の名前が「latitude」「longitude」のため、マッピングを修正
+                point = ds.sel(latitude=lat + lat_off, longitude=lon + lon_off, method="nearest")
+                subset = point.isel(time=0)
+                
+                # RTOFSの潮流変数名: u_velocity
+                u = float(subset["u_velocity"].values)
+                
+                # RTOFSの陸地判定: 陸地は「9.999e+20」という超巨大な数字で埋め尽くされている
+                if np.isnan(u) or u > 100000.0:
+                    continue
+                return point
+            except Exception:
+                continue
+    return None
+
+# =====================================================
+# NOAA RTOFS FORECAST 予測生成 (48時間分)
+# =====================================================
+def generate_forecast(lat, lon):
+    url = get_rtofs_url()
+    print(f"📡 [NOAA RTOFS FETCH] ターゲットURL: {url}")
+
     try:
-        subset = ds_local.sel(lat=lat, lon=lon, method="nearest").isel(time=0)
-        if "depth" in subset.dims:
-            subset = subset.isel(depth=0)
-        u = float(subset["water_u"].values)
-        v = float(subset["water_v"].values)
-        if np.isnan(u) or np.isnan(v):
-            return {"status": "error", "message": "land"}
-        speed = np.sqrt(u**2 + v**2) * 1.94384
-        direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
-        return {
-            "status": "success",
-            "velocity_knot": round(speed, 2),
-            "direction": round(direction, 1),
-            "source": "HYCOM"
-        }
+        # 💡 decode_times=False を追加して高速化＆メモリ不足によるRenderのクラッシュを防止
+        with xr.open_dataset(url, engine="netcdf4", decode_times=False, cache=False) as ds:
+            point = find_sea_point(ds, lat, lon)
+            if point is None:
+                return {"status": "error", "message": "sea point not found"}
+
+            results = []
+            
+            # RTOFSの time 軸（0番目＝最新予測）から1時間ずつ48時間分を抽出
+            for h in range(48):
+                try:
+                    subset = point.isel(time=h)
+
+                    # RTOFSの東西(u)・南北(v)の潮流流速
+                    u = float(subset["u_velocity"].values)
+                    v = float(subset["v_velocity"].values)
+
+                    # 陸地ダミー値（9.999e+20）または NaN のスキップ処理
+                    if np.isnan(u) or np.isnan(v) or u > 100000.0 or v > 100000.0:
+                        results.append({"time": h, "speed": 0.0, "direction": 0.0})
+                        continue
+
+                    # 流速(knot)と流向(degree)の計算
+                    speed = round(np.sqrt(u * u + v * v) * 1.94384, 2)
+                    direction = round((np.degrees(np.arctan2(v, u)) + 360) % 360, 1)
+
+                    results.append({"time": h, "speed": speed, "direction": direction})
+                except Exception:
+                    results.append({"time": h, "speed": 0.0, "direction": 0.0})
+
+            return {"status": "success", "data": results}
+
     except Exception as e:
+        print("❌ NOAA RTOFS fatal error:", e)
         return {"status": "error", "message": str(e)}
 
-# =========================
-# 🛳️ 海しる 1時間取得
-# =========================
-def fetch_umishiru_hour(area_code, hour):
+# =====================================================
+# RTOFS ENDPOINT
+# =====================================================
+@app.get("/forecast")
+def forecast(lat: float = Query(...), lon: float = Query(...)):
+    key = f"{lat:.2f}_{lon:.2f}"
+    now = datetime.utcnow().timestamp()
+
+    with lock:
+        cache = forecast_cache.get(key)
+        if cache:
+            # ゾンビキャッシュ防止ガード
+            if cache.get("data") and cache["data"].get("status") == "success" and cache["data"].get("data"):
+                if now - cache["time"] < RTOFS_TTL:
+                    print(f"⚡ NOAA RTOFS CACHE HIT {key}")
+                    return cache["data"]
+
+    print(f"📡 NOAA RTOFS FETCH {key}")
+    data = generate_forecast(lat, lon)
+
+    if data["status"] == "success" and data.get("data"):
+        with lock:
+            forecast_cache[key] = {"time": now, "data": data}
+
+    return data
+
+# =====================================================
+# UMISHIRU FETCH
+# =====================================================
+def fetch_umishiru_hour(area_code, hour, base_jst):
     try:
-        now_jst = datetime.now(JST)
-        base_jst = now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
         target = base_jst + timedelta(hours=hour)
         time_string = target.strftime("%Y%m%d%H%M")
+
         url = (
             "https://api.msil.go.jp/tidal-current-prediction/v3/data"
-            f"?areaCode={area_code}"
-            f"&time={time_string}"
-            f"&key={API_KEY}"
+            f"?areaCode={area_code}&time={time_string}&key={API_KEY}"
         )
-        r = requests.get(url, timeout=20)
+        r = requests.get(url, timeout=10)
         if r.status_code != 200:
             return None
+
         data = r.json()
         features = data.get("features", [])
         if not features:
-            return None
+            return {"time": hour, "speed": 0.0, "direction": 0.0}
+
         p = features[0]["properties"]
         return {
             "time": hour,
             "speed": p.get("currentSpeedKt", 0.0),
             "direction": p.get("currentDirection", 0.0)
         }
-    except Exception as e:
-        print("❌ umishiru error:", e)
+    except Exception:
         return None
 
-# =========================
-# 🌊 海しる48時間取得
-# =========================
-def fetch_48h(area_code):
-    print(f"📡 fetch_48h START: {area_code}")
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        results = list(executor.map(lambda h: fetch_umishiru_hour(area_code, h), range(48)))
-    filtered = [r for r in results if r]
-    print("✅ SUCCESS COUNT:", len(filtered))
-    if not filtered:
+def fetch_48h(area_code, base_jst):
+    results = []
+    for h in range(48):
+        r = fetch_umishiru_hour(area_code, h, base_jst)
+        if r:
+            results.append(r)
+
+    if not results:
         return {"status": "error", "data": []}
-    return {"status": "success", "data": filtered}
+    return {"status": "success", "data": results}
 
-# =========================
-# 🌊 海しるバックグラウンド更新
-# =========================
-def update_umishiru_background(areaCode):
-    cache = umishiru_cache.setdefault(areaCode, {
-        "last_good": None, "date": None, "updating": False, "building": False
-    })
-    try:
-        data = fetch_48h(areaCode)
-        if data["status"] == "success":
-            cache["last_good"] = data
-            save_umishiru_cache(areaCode, data)
-            cache["date"] = datetime.now(JST).date()
-            print("✅ SQLite cache updated:", areaCode)
-    finally:
-        with lock:
-            cache["updating"] = False
-
-# =========================
-# 🌊 海しるメイン取得ロジック（スッキリ最適化）
-# =========================
-def get_umishiru(areaCode):
-    cache = umishiru_cache.setdefault(areaCode, {
-        "last_good": None, "updating": False, "date": None, "building": False
-    })
-
-    # ① 【最優先】メモリキャッシュがあれば即返す
-    if cache["last_good"]:
-        return cache["last_good"]
-
-    # ② 【2番手】SQLiteキャッシュがあればメモリに載せて即返す（裏で更新）
-    cached_sqlite = load_umishiru_cache(areaCode)
-    if cached_sqlite:
-        cache["last_good"] = cached_sqlite
-        with lock:
-            if not cache["updating"]:
-                cache["updating"] = True
-                threading.Thread(target=update_umishiru_background, args=(areaCode,), daemon=True).start()
-        return cached_sqlite
-
-    # ③ 【最終手段】どこにも無ければその場でAPIを叩く
-    cache["building"] = True
-    try:
-        data = fetch_48h(areaCode)
-        if data["status"] == "success":
-            cache["last_good"] = data
-            save_umishiru_cache(areaCode, data)
-        return data
-    finally:
-        cache["building"] = False
-
-# =========================
-# 🚀 APIエンドポイント
-# =========================
-@app.get("/")
-def root():
-    return {"status": "ok"}
-
-@app.get("/current")
-def current(lat: float = Query(...), lon: float = Query(...)):
-    return get_from_hycom(lat, lon)
-
-# =========================
-# 🌊 HYCOM予報ロジック（スッキリ最適化）
-# =========================
-@app.get("/forecast")
-def forecast(lat: float = Query(...), lon: float = Query(...)):
-    if not hycom_ready or ds_local is None:
-        return {"status": "loading", "data": []}
-        
-    key = f"{round(lat,2)}_{round(lon,2)}"
-    now = datetime.utcnow().timestamp()
-
-    # ① 【最優先】メモリキャッシュが有効なら即返す
-    if key in forecast_cache:
-        cached = forecast_cache[key]
-        if now - cached["time"] < CACHE_TTL:
-            return cached["data"]
-
-    # ② 【2番手】SQLiteキャッシュがあればメモリに載せて即返す（裏で更新）
-    cached_sqlite = load_hycom_cache(key)
-    if cached_sqlite:
-        print("⚡ SQLite cache HIT")
-        forecast_cache[key] = {"time": now, "data": cached_sqlite, "updating": True}
-        threading.Thread(target=refresh_forecast_background, args=(lat, lon, key), daemon=True).start()
-        return cached_sqlite
-
-    # ③ 【最終手段】どこにも無ければその場でデータ生成
-    try:
-        response = generate_forecast(lat, lon)
-        forecast_cache[key] = {"time": now, "data": response, "updating": False}
-        save_hycom_cache(key, response)
-        return response
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
+# =====================================================
+# UMISHIRU ENDPOINT (キャッシュ管理をJST日付で完全固定)
+# =====================================================
 @app.get("/umishiru_forecast")
 def umishiru_forecast(areaCode: str):
-    print("📍 areaCode:", areaCode)
     if API_KEY is None:
         return {"status": "error", "message": "MSIL_API_KEY missing"}
-    return get_umishiru(areaCode)
-    
-def warmup():
-    try:
-        print("🔥 warmup waiting HYCOM")
-        while not hycom_ready:
-            time.sleep(1)
-        print("🔥 warmup start")
-        lat = 34.25
-        lon = 132.56
-        key = f"{round(lat,2)}_{round(lon,2)}"
-        response = generate_forecast(lat, lon)
-        forecast_cache[key] = {
-            "time": datetime.utcnow().timestamp(),
-            "data": response,
-            "updating": False
-        }
-        save_hycom_cache(key, response)
-        print("✅ warmup done")
-    except Exception as e:
-        print("❌ warmup error:", e)
 
-# =========================
-# 🏁 startup
-# =========================
-@app.on_event("startup")
-def startup():
-    print("🚀 server startup")
-    init_db()
-    threading.Thread(target=load_hycom, daemon=True).start()
-    threading.Thread(target=warmup, daemon=True).start()
+    now_jst = datetime.now(JST)
+    today_date = now_jst.date()
+
+    with lock:
+        cache = umishiru_cache.get(areaCode)
+        if cache and cache.get("date") == today_date:
+            if cache.get("data") and cache["data"].get("status") == "success":
+                print(f"⚡ UMISHIRU HIT {areaCode}")
+                return cache["data"]
+
+    print(f"📡 UMISHIRU FETCH {areaCode}")
+    base_jst = now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
+    data = fetch_48h(areaCode, base_jst)
+
+    if data["status"] == "success":
+        with lock:
+            umishiru_cache[areaCode] = {
+                "date": today_date,
+                "data": data
+            }
+
+    return data
+
+# =====================================================
+# ROOT
+# =====================================================
+@app.get("/")
+def root():
+    return {"status": "ok", "mode": "2026-noaa-rtofs-fixed"}
 
 if __name__ == "__main__":
     import uvicorn
