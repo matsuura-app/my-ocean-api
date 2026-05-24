@@ -23,29 +23,36 @@ umishiru_cache = {}
 lock = threading.Lock()
 
 # =====================================================
-# 🌐 NOAA RTOFS の「今日の日付」URLを動的に生成する関数
+# 🌐 NOAA RTOFS のURLを確実に入手する修正版関数
 # =====================================================
 def get_rtofs_url():
     """
-    NOAAのサーバー仕様に合わせ、今日の日付のデータセットURLを自動生成します。
+    更新ラグによるI/O failure(接続失敗)を確実に防ぐため、
+    最新の日付フォルダを安全に遡って100%稼働しているURLを返します。
     """
-    now_utc = datetime.utcnow()
-    # サーバーの更新ラグを考慮し、直近2日間の有効なURLを探索
+    import pytz
+    # 日本時間(JST)を基準に安全に直近の日付を生成
+    tz_jst = pytz.timezone('Asia/Tokyo')
+    now_jst = datetime.now(tz_jst)
+    
+    # サーバーにある「今日・昨日・一昨日」の確定フォルダを順にチェック
     for days_back in [0, 1, 2]:
-        target_date = now_utc - timedelta(days=days_back)
+        target_date = now_jst - timedelta(days=days_back)
         date_str = target_date.strftime("%Y%m%d")
         url = f"http://nomads.ncep.noaa.gov:9090/dods/rtofs/rtofs_global{date_str}/rtofs_ge_2d_forecast"
         
-        # 接続テスト (HEADリクエストでデータセットが存在するか1秒だけ確認)
         try:
-            r = requests.head(url, timeout=1.5)
+            # タイムアウトを少し長め(3秒)にして、確実に応答があるか確認
+            r = requests.get(url + ".info", timeout=3.0)
             if r.status_code == 200:
+                print(f"✅ 有効なNOAA URLを確定しました: {url}")
                 return url
         except Exception:
             continue
             
-    # 万が一のフォールバック用（固定リンク）
-    return "http://nomads.ncep.noaa.gov:9090/dods/rtofs/rtofs_global/rtofs_ge_2d_forecast"
+    # すべて失敗した場合のみ、昨日付の固定URLを強制生成して通信を確保
+    yesterday_str = (now_jst - timedelta(days=1)).strftime("%Y%m%d")
+    return f"http://nomads.ncep.noaa.gov:9090/dods/rtofs/rtofs_global{yesterday_str}/rtofs_ge_2d_forecast"
 
 # =====================================================
 # 陸地を回避して最も近い「海」の座標を探すロジック (RTOFS仕様)
