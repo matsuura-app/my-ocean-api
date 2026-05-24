@@ -1,427 +1,136 @@
 import os
-import json
-import sqlite3
 import threading
-
-from datetime import datetime, timedelta
-
-import numpy as np
+from datetime import datetime, timedelta, timezone
 import requests
-
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # =========================================================
-# CONFIG
+# CONFIG & ENVIRONMENT
 # =========================================================
-
-MSIL_API_KEY = os.getenv("MSIL_API_KEY")
-
-DATABASE = "cache.db"
-
-UMISHIRU_URL = (
-    "https://portal.msil.go.jp/"
-    "msil/OgpProvider/czm/current_forecast_grid.aspx"
-)
-
-KEEP_ALIVE_URL = os.getenv(
-    "KEEP_ALIVE_URL",
-    "https://my-ocean-api.onrender.com"
-)
+API_KEY = os.getenv("MSIL_API_KEY")
 
 session = requests.Session()
+session.headers.update({
+    "Origin": "https://my-ocean-api.onrender.com",
+    "Referer": "https://my-ocean-api.onrender.com/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+})
 
 # =========================================================
-# FASTAPI
+# FASTAPI & CORS
 # =========================================================
-
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # =========================================================
-# SQLITE
+# TIMEZONE & RENDER MEMORY CACHE
 # =========================================================
-
-db_lock = threading.Lock()
-
-def init_db():
-
-    with sqlite3.connect(DATABASE) as conn:
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS cache (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at TEXT
-        )
-        """)
-
-        conn.commit()
-
-init_db()
-
-def set_cache(key, value):
-
-    with db_lock:
-
-        with sqlite3.connect(DATABASE) as conn:
-
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO cache
-                (key, value, updated_at)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    key,
-                    json.dumps(value),
-                    datetime.utcnow().isoformat()
-                )
-            )
-
-            conn.commit()
-
-def get_cache(key, max_age_minutes=30):
-
-    with db_lock:
-
-        with sqlite3.connect(DATABASE) as conn:
-
-            cur = conn.execute(
-                """
-                SELECT value, updated_at
-                FROM cache
-                WHERE key=?
-                """,
-                (key,)
-            )
-
-            row = cur.fetchone()
-
-            if not row:
-                return None
-
-            value, updated_at = row
-
-            updated_at = datetime.fromisoformat(updated_at)
-
-            if (
-                datetime.utcnow() - updated_at
-                > timedelta(minutes=max_age_minutes)
-            ):
-                return None
-
-            return json.loads(value)
+JST = timezone(timedelta(hours=9))
+umishiru_cache = {}
+lock = threading.Lock()
 
 # =========================================================
-# UTIL
+# UMISHIRU FETCH LOGIC
 # =========================================================
-
-def safe_float(v, default=0.0):
+def fetch_umishiru_48h_bulk(area_code, base_jst):
+    time_string = base_jst.strftime("%Y%m%d%H%M")
+    url = "https://api.msil.go.jp/tidal-current-prediction/v3/data"
+    params = {"areaCode": area_code, "time": time_string, "key": API_KEY}
+    
+    print(f"📡 【海しるAPI送信】areaCode: {area_code} | time: {time_string}", flush=True)
 
     try:
+        r = session.get(url, params=params, timeout=(5, 15))
+        if r.status_code != 200:
+            print(f"⚠️ 海しるAPIエラー: STATUS {r.status_code}", flush=True)
+            return None
 
-        v = float(v)
+        data = r.json()
+        features = data.get("features", [])
+        if not features:
+            return None
 
-        if np.isnan(v):
-            return default
+        results = []
+        for feature in features:
+            p = feature.get("properties", {})
+            raw_time = p.get("time")
+            raw_speed = p.get("currentSpeedKt")
+            raw_direction = p.get("currentDirection")
+            
+            try:
+                speed = float(raw_speed) if raw_speed is not None else 0.0
+            except:
+                speed = 0.0
+                
+            try:
+                direction = float(raw_direction) if raw_direction is not None else 0.0
+            except:
+                direction = 0.0
 
-        if np.isinf(v):
-            return default
-
-        return v
-
-    except Exception:
-
-        return default
-
-# =========================================================
-# KEEP ALIVE
-# =========================================================
-
-def keep_alive_loop():
-
-    while True:
-
-        try:
-
-            requests.get(
-                KEEP_ALIVE_URL,
-                timeout=10
-            )
-
-            print(
-                "💓 KEEP ALIVE",
-                flush=True
-            )
-
-        except Exception as e:
-
-            print(
-                f"⚠️ KEEP ALIVE ERROR: {e}",
-                flush=True
-            )
-
-        threading.Event().wait(600)
-
-# =========================================================
-# UMISHIRU
-# =========================================================
-
-def fetch_umishiru_data():
-
-    cache_key = "umishiru"
-
-    cached = get_cache(
-        cache_key,
-        max_age_minutes=30
-    )
-
-    if cached:
-
-        print(
-            "💾 UMISHIRU CACHE HIT",
-            flush=True
-        )
-
-        return cached
-
-    print(
-        "🌐 FETCH UMISHIRU",
-        flush=True
-    )
-
-    headers = {}
-
-    if MSIL_API_KEY:
-
-        headers["Ocp-Apim-Subscription-Key"] = (
-            MSIL_API_KEY
-        )
-
-    try:
-
-        r = session.get(
-            UMISHIRU_URL,
-            headers=headers,
-            timeout=(5, 15)
-        )
-
-        if r.status_code == 200:
-
-            data = r.json()
-
-            set_cache(
-                cache_key,
-                data
-            )
-
-            return data
-
-        print(
-            f"⚠️ UMISHIRU STATUS {r.status_code}",
-            flush=True
-        )
-
+            results.append({
+                "time": raw_time,
+                "speed": speed,
+                "direction": direction
+            })
+        return {"status": "success", "data": results}
     except Exception as e:
-
-        print(
-            f"⚠️ UMISHIRU ERROR: {e}",
-            flush=True
-        )
-
-    return cached
-
-# =========================================================
-# FIND NEAREST
-# =========================================================
-
-def find_nearest_umishiru(
-    lat,
-    lon,
-    data
-):
-
-    if not data:
+        print(f"❌ 海しる通信例外: {e}", flush=True)
         return None
 
-    features = data.get(
-        "features",
-        []
-    )
-
-    nearest = None
-
-    min_dist = float("inf")
-
-    for feature in features:
-
-        try:
-
-            geom = feature.get(
-                "geometry",
-                {}
-            )
-
-            if geom.get("type") != "Point":
-                continue
-
-            coords = geom.get(
-                "coordinates",
-                []
-            )
-
-            if len(coords) < 2:
-                continue
-
-            f_lon = float(coords[0])
-            f_lat = float(coords[1])
-
-            dist = (
-                (lat - f_lat) ** 2
-                + (lon - f_lon) ** 2
-            )
-
-            if dist < min_dist:
-
-                min_dist = dist
-                nearest = feature
-
-        except Exception:
-            continue
-
-    # 約15km
-    if min_dist > 0.02:
-        return None
-
-    return nearest
-
 # =========================================================
-# WEATHER
+# APP ENDPOINTS
 # =========================================================
-
-def fetch_weather(lat, lon):
-
-    url = (
-        "https://api.open-meteo.com/v1/forecast"
-    )
-
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": (
-            "temperature_2m,"
-            "windspeed_10m,"
-            "winddirection_10m,"
-            "weathercode"
-        ),
-        "forecast_days": 3,
-        "timezone": "Asia/Tokyo"
-    }
-
-    try:
-
-        r = session.get(
-            url,
-            params=params,
-            timeout=(5, 15)
-        )
-
-        if r.status_code == 200:
-            return r.json()
-
-    except Exception as e:
-
-        print(
-            f"⚠️ WEATHER ERROR: {e}",
-            flush=True
-        )
-
-    return None
-
-# =========================================================
-# ROOT
-# =========================================================
-
 @app.get("/")
 def root():
+    return {"status": "ok", "server": "marine-v9-debug-active"}
 
-    return {
-        "status": "ok",
-        "server": "marine-final-v1"
-    }
+@app.get("/umishiru_forecast")
+def umishiru_forecast(areaCode: str = Query(..., alias="areaCode")):
+    if not API_KEY or API_KEY.strip() == "":
+        return {"status": "error", "message": "MSIL_API_KEY is missing."}
 
-# =========================================================
-# FORECAST
-# =========================================================
+    now_jst = datetime.now(JST)
+    with lock:
+        cache = umishiru_cache.get(areaCode)
+        if cache and cache.get("expires") > now_jst:
+            return cache["data"]
+
+    base_jst = now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
+    data = fetch_umishiru_48h_bulk(areaCode, base_jst)
+
+    if data and data["status"] == "success":
+        with lock:
+            umishiru_cache[areaCode] = {
+                "expires": now_jst + timedelta(hours=6),
+                "data": data
+            }
+        return data
+    return {"status": "error", "message": "Failed to fetch from Umishiru."}
 
 @app.get("/forecast")
-def forecast(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
+def forecast(lat: float = Query(...), lon: float = Query(...)):
+    # 簡易天気用プレースホルダー
+    return {"status": "success", "lat": lat, "lon": lon, "weather": None}
 
-    print(
-        f"📡 REQUEST lat={lat} lon={lon}",
-        flush=True
-    )
-
-    weather = fetch_weather(
-        lat,
-        lon
-    )
-
-    umishiru = fetch_umishiru_data()
-
-    current = None
-
-    if umishiru:
-
-        nearest = find_nearest_umishiru(
-            lat,
-            lon,
-            umishiru
-        )
-
-        if nearest:
-
-            props = nearest.get(
-                "properties",
-                {}
-            )
-
-            current = {
-                "speed": safe_float(
-                    props.get("speed", 0)
-                ),
-                "direction": safe_float(
-                    props.get("direction", 0)
-                )
-            }
-
-    return {
-        "status": "success",
-        "lat": lat,
-        "lon": lon,
-        "current": current,
-        "weather": weather
-    }
+@app.get("/tide")
+def tide(port_code: str, year: int, month: int, day: int):
+    return {"status": "success"}
 
 # =========================================================
-# STARTUP
+# 🔍 相手のAI推奨：ルート確認＆ファイル読み込みチェック用
 # =========================================================
+@app.get("/routes")
+def routes():
+    """現在FastAPIに登録されているURLルートの一覧を返します"""
+    return [route.path for route in app.routes]
 
-@app.on_event("startup")
-def startup():
-
-    threading.Thread(
-        target=keep_alive_loop,
-        daemon=True
-    ).start()
+# 起動時にログに強制出力させてファイル生存確認を行う
+print("🔥 CURRENT FILE LOADED: marine-final-v9-origin-fixed", flush=True)
