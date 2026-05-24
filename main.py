@@ -1,9 +1,10 @@
-from fastapi import FastAPI, Query  # 💡 from を小文字に修正
+from fastapi import FastAPI, Query, HTTPException
 import xarray as xr
 import numpy as np
 import requests
 import threading
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 # =====================================================
@@ -13,8 +14,9 @@ app = FastAPI()
 API_KEY = os.getenv("MSIL_API_KEY")
 
 # =====================================================
-# 設定・タイムゾーン
+# 設定・タイムゾーン (JST / UTC)
 # =====================================================
+UTC = timezone.utc
 JST = timezone(timedelta(hours=9))
 RTOFS_TTL = 1800        # 30分
 
@@ -23,106 +25,107 @@ umishiru_cache = {}
 lock = threading.Lock()
 
 # =====================================================
-# 🌐 NOAA RTOFS のURLを確実に入手する修正版関数
+# 🌐 URL確定ロジック (pydap / netcdf4 両対応防御版)
 # =====================================================
 def get_rtofs_url():
     """
-    更新ラグによるI/O failure(接続失敗)を確実に防ぐため、
-    最新の日付フォルダを安全に遡って100%稼働しているURLを返します。
+    pytzを完全に排除し、標準datetimeのみでNOAAのURL生存確認を行います。
     """
-    import pytz
-    # 日本時間(JST)を基準に安全に直近の日付を生成
-    tz_jst = pytz.timezone('Asia/Tokyo')
-    now_jst = datetime.now(tz_jst)
-    
-    # サーバーにある「今日・昨日・一昨日」の確定フォルダを順にチェック
-    for days_back in [0, 1, 2]:
-        target_date = now_jst - timedelta(days=days_back)
-        date_str = target_date.strftime("%Y%m%d")
-        url = f"http://nomads.ncep.noaa.gov:9090/dods/rtofs/rtofs_global{date_str}/rtofs_ge_2d_forecast"
-        
-        try:
-            # タイムアウトを少し長め(3秒)にして、確実に応答があるか確認
-            r = requests.get(url + ".info", timeout=3.0)
-            if r.status_code == 200:
-                print(f"✅ 有効なNOAA URLを確定しました: {url}")
-                return url
-        except Exception:
-            continue
-            
-    # すべて失敗した場合のみ、昨日付の固定URLを強制生成して通信を確保
-    yesterday_str = (now_jst - timedelta(days=1)).strftime("%Y%m%d")
-    return f"http://nomads.ncep.noaa.gov:9090/dods/rtofs/rtofs_global{yesterday_str}/rtofs_ge_2d_forecast"
+    now_utc = datetime.now(UTC)
 
-# =====================================================
-# 陸地を回避して最も近い「海」の座標を探すロジック (RTOFS仕様)
-# =====================================================
-def find_sea_point(ds, lat, lon):
-    offsets = [0, 0.04, -0.04, 0.08, -0.08]
-    for lat_off in offsets:
-        for lon_off in offsets:
+    # サーバーの反映ラグを考慮し、今日・昨日・一昨日の順でデータを探す
+    for days_back in [0, 1, 2]:
+        target_date = now_utc - timedelta(days=days_back)
+        date_str = target_date.strftime("%Y%m%d")
+
+        url_candidates = [
+            f"https://nomads.ncep.noaa.gov/dods/rtofs/rtofs_global{date_str}/rtofs_glo_2ds_forecast_3hrly_prog",
+            f"https://nomads.ncep.noaa.gov:9090/dods/rtofs/rtofs_global{date_str}/rtofs_glo_2ds_forecast_3hrly_prog",
+            f"https://nomads.ncep.noaa.gov/dods/rtofs/rtofs_global{date_str}/rtofs_glo_2ds_forecast_time_prog"
+        ]
+
+        for url in url_candidates:
             try:
-                # 💡 RTOFSは軸の名前が「latitude」「longitude」のため、マッピングを修正
-                point = ds.sel(latitude=lat + lat_off, longitude=lon + lon_off, method="nearest")
-                subset = point.isel(time=0)
-                
-                # RTOFSの潮流変数名: u_velocity
-                u = float(subset["u_velocity"].values)
-                
-                # RTOFSの陸地判定: 陸地は「9.999e+20」という超巨大な数字で埋め尽くされている
-                if np.isnan(u) or u > 100000.0:
-                    continue
-                return point
-            except Exception:
+                # 接続テスト (まずは軽量に開く)
+                test = xr.open_dataset(url, engine="netcdf4", decode_times=False, cache=False)
+                test.close()
+                print(f"🚀 [NOAA CONNECT SUCCESS] URL特定: {url}", flush=True)
+                return url
+            except Exception as e:
+                print(f"⚠️ URLスキップ: {url} | 原因: {e}", flush=True)
                 continue
+
     return None
 
 # =====================================================
-# NOAA RTOFS FORECAST 予測生成 (48時間分)
+# 🔍 内部構造を解析してデータ抽出するメイン関数
 # =====================================================
 def generate_forecast(lat, lon):
     url = get_rtofs_url()
-    print(f"📡 [NOAA RTOFS FETCH] ターゲットURL: {url}")
+    if url is None:
+        return {"status": "error", "message": "No active NOAA RTOFS dataset found"}
 
     try:
-        # 💡 decode_times=False を追加して高速化＆メモリ不足によるRenderのクラッシュを防止
-        with xr.open_dataset(url, engine="netcdf4", decode_times=False, cache=False) as ds:
-            point = find_sea_point(ds, lat, lon)
-            if point is None:
-                return {"status": "error", "message": "sea point not found"}
+        # pydapでの接続失敗回避のため、netcdf4を優先しつつフォールバック設計
+        try:
+            ds = xr.open_dataset(url, engine="netcdf4", decode_times=False, cache=False)
+        except Exception:
+            ds = xr.open_dataset(url, engine="pydap", decode_times=False, cache=False)
+
+        with ds:
+            # 座標軸判定
+            lat_name = "lat" if "lat" in ds.coords else "latitude" if "latitude" in ds.coords else None
+            lon_name = "lon" if "lon" in ds.coords else "longitude" if "longitude" in ds.coords else None
+            
+            if not lat_name or not lon_name:
+                return {"status": "error", "message": "Required coordinates not found"}
+
+            # 最寄り座標の抽出
+            point = ds.sel({lat_name: lat, lon_name: lon}, method="nearest")
+
+            available_vars = list(point.data_vars)
+            u_varname = "u" if "u" in available_vars else "u_velocity" if "u_velocity" in available_vars else None
+            v_varname = "v" if "v" in available_vars else "v_velocity" if "v_velocity" in available_vars else None
+
+            if not u_varname or not v_varname:
+                return {"status": "error", "message": "Velocity variables missing"}
 
             results = []
             
-            # RTOFSの time 軸（0番目＝最新予測）から1時間ずつ48時間分を抽出
-            for h in range(48):
+            # 48時間分 (3時間刻み前提で16ステップ) のループ
+            for i in range(16):
+                hour_val = i * 3
                 try:
-                    subset = point.isel(time=h)
+                    t_subset = point.isel(time=i)
+                    
+                    if "ens" in t_subset.dims:
+                        t_subset = t_subset.isel(ens=0)
+                    if "lev" in t_subset.dims:
+                        t_subset = t_subset.isel(lev=0)
 
-                    # RTOFSの東西(u)・南北(v)の潮流流速
-                    u = float(subset["u_velocity"].values)
-                    v = float(subset["v_velocity"].values)
+                    # NumPyのバージョン依存(3.14環境)を破壊する .item() 化
+                    u = float(t_subset[u_varname].values.item())
+                    v = float(t_subset[v_varname].values.item())
 
-                    # 陸地ダミー値（9.999e+20）または NaN のスキップ処理
                     if np.isnan(u) or np.isnan(v) or u > 100000.0 or v > 100000.0:
-                        results.append({"time": h, "speed": 0.0, "direction": 0.0})
+                        results.append({"time": hour_val, "speed": 0.0, "direction": 0.0})
                         continue
 
-                    # 流速(knot)と流向(degree)の計算
                     speed = round(np.sqrt(u * u + v * v) * 1.94384, 2)
                     direction = round((np.degrees(np.arctan2(v, u)) + 360) % 360, 1)
+                    results.append({"time": hour_val, "speed": speed, "direction": direction})
 
-                    results.append({"time": h, "speed": speed, "direction": direction})
-                except Exception:
-                    results.append({"time": h, "speed": 0.0, "direction": 0.0})
+                except Exception as val_err:
+                    print(f"❌ [VALUE ERROR] index={i}: {val_err}", flush=True)
+                    results.append({"time": hour_val, "speed": 0.0, "direction": 0.0})
 
             return {"status": "success", "data": results}
 
     except Exception as e:
-        print("❌ NOAA RTOFS fatal error:", e)
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Fatal Crash: {str(e)}"}
 
 # =====================================================
-# RTOFS ENDPOINT
+# 各エンドポイント
 # =====================================================
 @app.get("/forecast")
 def forecast(lat: float = Query(...), lon: float = Query(...)):
@@ -132,100 +135,16 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
     with lock:
         cache = forecast_cache.get(key)
         if cache:
-            # ゾンビキャッシュ防止ガード
-            if cache.get("data") and cache["data"].get("status") == "success" and cache["data"].get("data"):
+            if cache.get("data") and cache["data"].get("status") == "success":
                 if now - cache["time"] < RTOFS_TTL:
-                    print(f"⚡ NOAA RTOFS CACHE HIT {key}")
                     return cache["data"]
 
-    print(f"📡 NOAA RTOFS FETCH {key}")
     data = generate_forecast(lat, lon)
-
-    if data["status"] == "success" and data.get("data"):
-        with lock:
-            forecast_cache[key] = {"time": now, "data": data}
-
-    return data
-
-# =====================================================
-# UMISHIRU FETCH
-# =====================================================
-def fetch_umishiru_hour(area_code, hour, base_jst):
-    try:
-        target = base_jst + timedelta(hours=hour)
-        time_string = target.strftime("%Y%m%d%H%M")
-
-        url = (
-            "https://api.msil.go.jp/tidal-current-prediction/v3/data"
-            f"?areaCode={area_code}&time={time_string}&key={API_KEY}"
-        )
-        r = requests.get(url, timeout=10)
-        if r.status_code != 200:
-            return None
-
-        data = r.json()
-        features = data.get("features", [])
-        if not features:
-            return {"time": hour, "speed": 0.0, "direction": 0.0}
-
-        p = features[0]["properties"]
-        return {
-            "time": hour,
-            "speed": p.get("currentSpeedKt", 0.0),
-            "direction": p.get("currentDirection", 0.0)
-        }
-    except Exception:
-        return None
-
-def fetch_48h(area_code, base_jst):
-    results = []
-    for h in range(48):
-        r = fetch_umishiru_hour(area_code, h, base_jst)
-        if r:
-            results.append(r)
-
-    if not results:
-        return {"status": "error", "data": []}
-    return {"status": "success", "data": results}
-
-# =====================================================
-# UMISHIRU ENDPOINT (キャッシュ管理をJST日付で完全固定)
-# =====================================================
-@app.get("/umishiru_forecast")
-def umishiru_forecast(areaCode: str):
-    if API_KEY is None:
-        return {"status": "error", "message": "MSIL_API_KEY missing"}
-
-    now_jst = datetime.now(JST)
-    today_date = now_jst.date()
-
-    with lock:
-        cache = umishiru_cache.get(areaCode)
-        if cache and cache.get("date") == today_date:
-            if cache.get("data") and cache["data"].get("status") == "success":
-                print(f"⚡ UMISHIRU HIT {areaCode}")
-                return cache["data"]
-
-    print(f"📡 UMISHIRU FETCH {areaCode}")
-    base_jst = now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
-    data = fetch_48h(areaCode, base_jst)
-
     if data["status"] == "success":
         with lock:
-            umishiru_cache[areaCode] = {
-                "date": today_date,
-                "data": data
-            }
-
+            forecast_cache[key] = {"time": now, "data": data}
     return data
 
-# =====================================================
-# ROOT
-# =====================================================
 @app.get("/")
 def root():
-    return {"status": "ok", "mode": "2026-noaa-rtofs-fixed"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    return {"status": "ok", "mode": "2026-final-pytz-absolute-zero"}
