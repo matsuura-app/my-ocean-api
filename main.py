@@ -1,13 +1,18 @@
 import os
+import socket
 from datetime import datetime, timedelta
 import numpy as np
 import xarray as xr
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+# アドバイス③：グローバルでのタイムアウトを設定してハングを徹底防御
+socket.setdefaulttimeout(20)
+
 app = FastAPI()
 
-# CORS設定（フロントエンドアプリからのアクセスを許可）
+# CORS設定
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,120 +21,191 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"Status": "ok", "mode": "2026-noaa-rtofs-fixed-v2"}
+# --- 海しる用設定 ---
+UMISHIRU_URL = "https://msil.go.jp/msil/OgpProvider/czm/current_forecast_grid.aspx"
+umishiru_cache = {"data": None, "fetched_at": None}
 
-def get_active_rtofs_dataset():
+def fetch_umishiru_data():
+    now = datetime.now()
+    if umishiru_cache["data"] and umishiru_cache["fetched_at"]:
+        if now - umishiru_cache["fetched_at"] < timedelta(minutes=30):
+            print("💾 [海しる] キャッシュからデータを返却します", flush=True)
+            return umishiru_cache["data"]
+
+    print("🌐 [海しる] 海上保安庁サーバーから新規データを取りに行きます...", flush=True)
+    try:
+        response = requests.get(UMISHIRU_URL, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            umishiru_cache["data"] = data
+            umishiru_cache["fetched_at"] = now
+            return data
+    except Exception as e:
+        print(f"⚠️ [海しる] データ取得失敗: {e}", flush=True)
+    return umishiru_cache["data"]
+
+def find_nearest_umishiru(lat: float, lon: float, data: dict):
+    if not data or "features" not in data:
+        return None
+    nearest_feature = None
+    min_dist = float("inf")
+    for feature in data["features"]:
+        geom = feature.get("geometry", {})
+        if geom.get("type") == "Point":
+            coords = geom.get("coordinates", [])
+            if len(coords) >= 2:
+                m_lon, m_lat = coords[0], coords[1]
+                dist = (lat - m_lat) ** 2 + (lon - m_lon) ** 2
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_feature = feature
+    if min_dist > 0.02: # 約15km
+        return None
+    return nearest_feature
+
+
+# --- NOAA用設定（アドバイスを100%反映した修正版） ---
+def get_active_rtofs_url():
     """
-    NOAA RTOFS の OpenDAP サーバーから、現在アクセス可能な有効なデータセットを探します。
-    直近3日分の候補URLを巡回し、最初につながったものを返します。
+    アドバイスに従い、ポート :9090 を完全に廃止し、
+    安全な『https://.../dods/rtofs/rtofs...』のURL構造でチェックします。
     """
-    base_url = "http://nomads.ncep.noaa.gov:9090/dods/rtofs"
+    # 修正：:9090を消し、dodsを含めた最新の正しいベースURLに固定
+    base_url = "https://nomads.ncep.noaa.gov/dods/rtofs"
     
-    # 候補となるデータセット名（アドバイス画像にあったパターンを網羅）
+    # アドバイス④：最近安定しているパターンを優先
     dataset_patterns = [
-        "rtofs_glo_2ds_forecast_3hrly_prog",
-        "rtofs_glo_2ds_f006_3hrly_prog"
+        "rtofs_glo_2ds_f006_3hrly_prog",
+        "rtofs_glo_2ds_forecast_3hrly_prog"
     ]
     
-    # 今日から3日前までの日付をチェック
-    now = datetime.utcnow()
-    for i in range(3):
-        target_date = (now - timedelta(days=i)).strftime("%Y%m%d")
+    now_utc = datetime.utcnow()
+    
+    for days_back in [0, 1, 2]:
+        target_date = now_utc - timedelta(days=days_back)
+        date_str = target_date.strftime("%Y%m%d")
+        
         for pattern in dataset_patterns:
-            # URL例: http://nomads.ncep.noaa.gov:9090/dods/rtofs/rtofs20260524/rtofs_glo_2ds_forecast_3hrly_prog
-            url = f"{base_url}/rtofs{target_date}/{pattern}"
-            print(f"🔍 NOAA接続テスト中: {url}")
+            # 正しいURL組み立て
+            url = f"{base_url}/rtofs{date_str}/{pattern}"
+            dds_url = url + ".dds"
+            
+            print(f"🔍 NOAA URL確認中(修正版): {dds_url}", flush=True)
             try:
-                # テストとして、メタデータ（構造）だけを高速に読み込めるか確認
-                ds = xr.open_dataset(url, decode_times=False, cache=False)
-                print(f"🚀 [NOAA CONNECT SUCCESS] 有効なURLを発見: {url}")
-                return ds, url
+                # タイムアウトを設けて軽量な.ddsだけを取得
+                r = requests.get(dds_url, timeout=7.0)
+                if r.status_code == 200:
+                    print(f"🚀 NOAA URL OK (接続成功!): {url}", flush=True)
+                    return url
+                else:
+                    print(f"⚠️ NOAA URL NG (Status {r.status_code}): {url}", flush=True)
             except Exception as e:
-                print(f"⚠️ URLスキップ: {url} | 原因: {str(e)}")
+                print(f"⚠️ NOAA URL NG (エラー): {str(e)}", flush=True)
                 continue
                 
-    return None, None
+    return None
 
-def generate_forecast(lat: float, lon: float):
-    # 経度を NOAA 基準 (0〜360) に変換
+def generate_noaa_forecast(lat: float, lon: float):
     if lon < 0:
         lon += 360.0
 
-    # 有効なデータセットを自動取得
-    ds, active_url = get_active_rtofs_dataset()
-    if not ds:
+    active_url = get_active_rtofs_url()
+    if not active_url:
         raise HTTPException(
             status_code=503,
-            detail="NOAA RTOFS サーバーが応答しないか、本日のデータがまだ生成されていません。しばらく経ってから再度お試しください。"
+            detail="NOAA RTOFS サーバーの有効なURLが見つかりません。HTTPS通信、またはNOAA側のデータが未生成の可能性があります。"
         )
 
-    print("=== DATA VARIABLES ===")
-    print(ds.data_vars)
-    print("======================")
-
-    # 変数名の決定 (u, v または u_velocity, v_velocity)
-    u_var = "u" if "u" in ds.data_vars else "u_velocity" if "u_velocity" in ds.data_vars else None
-    v_var = "v" if "v" in ds.data_vars else "v_velocity" if "v_velocity" in ds.data_vars else None
-
-    if not u_var or not v_var:
-        raise HTTPException(status_code=500, detail="NOAAデータ内の流速変数名(u, v)が見つかりません。")
+    # アドバイス②：engine="pydap", decode_times=False を指定して安定化
+    try:
+        print(f"📦 xarrayでNOAAデータ展開 (engine=pydap): {active_url}", flush=True)
+        ds = xr.open_dataset(active_url, engine="pydap", decode_times=False)
+    except Exception as e:
+        print(f"❌ pydap展開エラー: {str(e)}", flush=True)
+        raise HTTPException(status_code=500, detail=f"NOAAデータ解析エラー: {str(e)}")
 
     try:
-        # 最も近い位置のデータを抽出
-        point = ds.sel(lat=lat, lon=lon, method="nearest")
-        results = []
+        lat_key = "lat" if "lat" in ds.coords else "latitude" if "latitude" in ds.coords else "lat"
+        lon_key = "lon" if "lon" in ds.coords else "longitude" if "longitude" in ds.coords else "lon"
+        point = ds.sel({lat_key: lat, lon_key: lon}, method="nearest")
 
-        # 48時間分（3時間毎なので16ステップ）のデータを取得
-        # ループ回数はアドバイス画像に基づき調整
-        for h in range(16):
+        u_var = "u" if "u" in ds.data_vars else "u_velocity" if "u_velocity" in ds.data_vars else None
+        v_var = "v" if "v" in ds.data_vars else "v_velocity" if "v_velocity" in ds.data_vars else None
+
+        if not u_var or not v_var:
+            raise ValueError("流速データ(u, v)が見つかりません。")
+
+        results = []
+        for h in range(16): # 48時間分
             try:
                 subset = point.isel(time=h)
                 
-                # アドバイスに従い、.values.item() を使って安全に数値化
+                # 最優先アドバイス：.item() を使って純粋なfloatにする
                 u_val = float(subset[u_var].values.item())
                 v_val = float(subset[v_var].values.item())
 
-                # 値が欠損（NaN）の場合はスキップ
-                if np.isnan(u_val) or np.isnan(v_val):
+                if np.isnan(u_val) or np.isnan(v_val) or abs(u_val) > 99.0 or abs(v_val) > 99.0:
+                    results.append({"time": h * 3, "speed": 0.0, "direction": 0.0})
                     continue
 
-                # 流速 (speed) と 流向 (direction) を計算
-                speed = float(np.sqrt(u_val**2 + v_val**2))
+                speed_ms = np.sqrt(u_val**2 + v_val**2)
+                speed_knots = float(speed_ms * 1.94384)
+                
                 direction = float(np.degrees(np.arctan2(u_val, v_val)))
                 if direction < 0:
                     direction += 360.0
 
-                # 3時間毎の予測時間として返却
                 results.append({
                     "time": h * 3,
-                    "speed": round(speed, 2),
+                    "speed": round(speed_knots, 2),
                     "direction": round(direction, 1)
                 })
-            except Exception as loop_e:
-                print(f"❌ [VALUE ERROR] タイムステップ {h} の解析に失敗: {str(loop_e)}")
-                # 特定の時間だけデータが壊れている場合は飛ばして次に進む
-                continue
+            except Exception:
+                results.append({"time": h * 3, "speed": 0.0, "direction": 0.0})
 
         return results
-
-    except Exception as e:
-        print(f"❌ [CRITICAL ERROR] データ解析全体に失敗: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"データ解析エラー: {str(e)}")
     finally:
         ds.close()
 
+# --- メインエンドポイント ---
+@app.get("/")
+def read_root():
+    return {"Status": "ok", "mode": "2026-hybrid-fixed-v2"}
+
 @app.get("/forecast")
 def forecast(
-    lat: float = Query(..., description="Latitude (e.g. 33.3)"),
-    lon: float = Query(..., description="Longitude (e.g. 133.5)")
+    lat: float = Query(..., description="Latitude"),
+    lon: float = Query(..., description="Longitude")
 ):
-    print(f"📡 NOAA RTOFS FETCH: lat={lat}, lon={lon}")
-    data = generate_forecast(lat, lon)
+    print(f"📡 潮流リクエスト受信: lat={lat}, lon={lon}", flush=True)
+
+    # 【第1のコース】日本近海なら「海しる」を最優先
+    umishiru_raw = fetch_umishiru_data()
+    if umishiru_raw:
+        match = find_nearest_umishiru(lat, lon, umishiru_raw)
+        if match:
+            print("🎯 [海しる] エリア内のため、海上保安庁のデータを採用します", flush=True)
+            props = match.get("properties", {})
+            return {
+                "status": "success",
+                "source": "umishiru",
+                "lat": lat,
+                "lon": lon,
+                "data": [{
+                    "time": 0,
+                    "speed": props.get("speed", 0.0),
+                    "direction": props.get("direction", 0.0)
+                }]
+            }
+
+    # 【第2のコース】エリア外なら、修正された「NOAA」へ通信
+    print("🌐 [NOAA] 海しるエリア外（または取得失敗）のため、修正版NOAA予測に切り替えます", flush=True)
+    noaa_data = generate_noaa_forecast(lat, lon)
+    
     return {
         "status": "success",
+        "source": "noaa_rtofs",
         "lat": lat,
         "lon": lon,
-        "data": data
+        "data": noaa_data
     }
