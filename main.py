@@ -166,34 +166,25 @@ def hycom_watchdog():
 
     while True:
         try:
-            test_ds = xr.open_dataset(
-                DATA_URL,
-                decode_times=False,
-                chunks={}
-            )
+            # ★軽いHTTPチェック（重要）
+            import requests
 
-            # 軽いメタ情報だけ見る
-            new_time_size = test_ds.sizes.get("time", 0)
+            r = requests.head(DATA_URL, timeout=10)
 
+            if r.status_code != 200:
+                print("HYCOM not reachable")
+                time.sleep(6 * 3600)
+                continue
+
+            # ★初回だけロード
             if ds_local is None:
-                ds_local = test_ds.sel(lat=slice(30,46), lon=slice(129,146))
+                ds_local = xr.open_dataset(
+                    DATA_URL,
+                    decode_times=False
+                ).sel(lat=slice(30,46), lon=slice(129,146))
+
                 hycom_ready = True
-
-            else:
-                old_time_size = ds_local.sizes.get("time", 0)
-
-                if new_time_size != old_time_size:
-                    print("🔄 HYCOM updated")
-
-                    old = ds_local
-
-                    ds_local = test_ds.sel(lat=slice(30,46), lon=slice(129,146))
-                    hycom_ready = True
-
-                    try:
-                        old.close()
-                    except:
-                        pass
+                print("HYCOM initial load done")
 
         except Exception as e:
             print("HYCOM watch error:", e)
