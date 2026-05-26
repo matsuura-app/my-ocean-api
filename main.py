@@ -315,7 +315,6 @@ def umishiru_forecast(
 ):
 
     if not API_KEY:
-
         return {
             "status": "error",
             "message": "MSIL_API_KEY missing"
@@ -324,11 +323,57 @@ def umishiru_forecast(
     now_jst = datetime.now(JST)
 
     with lock:
-
         cache = umishiru_cache.get(areaCode)
 
-        if cache and cache["expires"] > now_jst:
-            return cache["data"]
+    # =====================================================
+    # キャッシュ存在時
+    # =====================================================
+
+    if cache:
+
+        # まず古いデータでも即返す
+        cached_data = cache["data"]
+
+        # 期限切れなら裏更新
+        if cache["expires"] <= now_jst:
+
+            def refresh():
+
+                try:
+
+                    new_data = fetch_48h_parallel(areaCode)
+
+                    if new_data["status"] == "success":
+
+                        with lock:
+
+                            umishiru_cache[areaCode] = {
+                                "expires": now_jst + timedelta(hours=6),
+                                "data": new_data
+                            }
+
+                        print(
+                            f"Umishiru refreshed: {areaCode}",
+                            flush=True
+                        )
+
+                except Exception as e:
+
+                    print(
+                        f"Umishiru refresh error: {e}",
+                        flush=True
+                    )
+
+            threading.Thread(
+                target=refresh,
+                daemon=True
+            ).start()
+
+        return cached_data
+
+    # =====================================================
+    # 初回取得
+    # =====================================================
 
     data = fetch_48h_parallel(areaCode)
 
