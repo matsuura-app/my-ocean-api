@@ -93,7 +93,7 @@ DATA_URL = (
 )
 
 ds_local = None
-
+hycom_ready = False
 # =========================================================
 # SQLITE
 # =========================================================
@@ -590,13 +590,16 @@ def routes():
 # =========================================================
 @app.on_event("startup")
 def startup():
-    print("HYCOM loading...")
-
-    threading.Thread(target=load_hycom, daemon=True).start()
-
-    print("HYCOM thread started")
 
     init_db()
 
-    threading.Thread(target=hycom_watchdog, daemon=True).start()
-    threading.Thread(target=reset_daily_cache, daemon=True).start()
+    # watchdogだけ起動
+    threading.Thread(
+        target=hycom_watchdog,
+        daemon=True
+    ).start()
+
+    threading.Thread(
+        target=reset_daily_cache,
+        daemon=True
+    ).start()
