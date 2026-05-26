@@ -52,8 +52,6 @@ last_hycom_signature = None
 # =========================================================
 # TIME UTIL
 # =========================================================
-
-from datetime import datetime, timedelta, timezone
 import time
 
 JST = timezone(timedelta(hours=9))
@@ -67,7 +65,6 @@ def is_new_day(last_update: datetime):
 # =========================================================
 # DAILY RESET (核心)
 # =========================================================
-
 def reset_daily_cache():
     global umishiru_cache, forecast_cache
 
@@ -77,16 +74,14 @@ def reset_daily_cache():
         now = datetime.now(JST)
 
         if last_reset_day != now.date():
-            if now.hour == 0:
-                with lock:
-                    print("🔄 Daily cache reset")
-                    umishiru_cache = {}
-                    forecast_cache = {}
+            with lock:
+                print("🔄 Daily cache reset")
+                umishiru_cache = {}
+                forecast_cache = {}
 
-                last_reset_day = now.date()
+            last_reset_day = now.date()
 
         time.sleep(60)
-
 # =========================================================
 # HYCOM CONFIG
 # =========================================================
@@ -98,7 +93,6 @@ DATA_URL = (
 )
 
 ds_local = None
-hycom_ready = False
 
 # =========================================================
 # SQLITE
@@ -132,14 +126,11 @@ def init_db():
 # =========================================================
 # HYCOM LOAD
 # =========================================================
-
 def load_hycom():
-
-    global ds_local, hycom_ready
-
-    print("HYCOM loading...", flush=True)
+    global ds_local
 
     try:
+        print("HYCOM loading...", flush=True)
 
         ds_local = xr.open_dataset(
             DATA_URL,
@@ -150,23 +141,19 @@ def load_hycom():
             lon=slice(129, 146)
         )
 
-        hycom_ready = True
-
-        print("HYCOM ready", flush=True)
+        print("HYCOM loaded", flush=True)
 
     except Exception as e:
-
         print("HYCOM load error:", e, flush=True)
 
 # =========================================================
 # HYCOM WATCHDOG（追加）
 # =========================================================
 def hycom_watchdog():
-    global ds_local, hycom_ready
+    global ds_local
 
     while True:
         try:
-            # ★軽いHTTPチェック（重要）
             import requests
 
             r = requests.head(DATA_URL, timeout=10)
@@ -176,27 +163,32 @@ def hycom_watchdog():
                 time.sleep(6 * 3600)
                 continue
 
-            # ★初回だけロード
             if ds_local is None:
-                ds_local = xr.open_dataset(
-                    DATA_URL,
-                    decode_times=False
-                ).sel(lat=slice(30,46), lon=slice(129,146))
+                with lock:
+                    if ds_local is None:
+                        print("HYCOM initial loading...")
 
-                hycom_ready = True
-                print("HYCOM initial load done")
+                        ds_local = xr.open_dataset(
+                            DATA_URL,
+                            decode_times=False
+                        ).sel(
+                            lat=slice(30, 46),
+                            lon=slice(129, 146)
+                        )
+
+                        print("HYCOM initial load done")
 
         except Exception as e:
             print("HYCOM watch error:", e)
 
-        time.sleep(6 * 3600)
+        time.sleep(12 * 3600)
 # =========================================================
 # HYCOM CURRENT
 # =========================================================
 
 def get_from_hycom(lat, lon):
 
-    if not hycom_ready or ds_local is None:
+    if ds_local is None:
         return {
             "status": "loading",
             "message": "HYCOM initializing"
@@ -276,7 +268,6 @@ def fetch_weather_logic(lat, lon):
     }
 
     try:
-
         r = session.get(
             "https://api.open-meteo.com/v1/forecast",
             params=params,
@@ -286,9 +277,8 @@ def fetch_weather_logic(lat, lon):
         if r.status_code == 200:
             return r.json()
 
-    except:
-        pass
-
+    except Exception as e:
+        print("weather fetch error:", e)
     return None
 # =========================================================
 # UMISHIRU
@@ -465,10 +455,10 @@ def umishiru_forecast(
 
 @app.get("/")
 def root():
-
     return {
         "status": "ok",
-        "server": "marine-final"
+        "server": "marine-final",
+        "hycom_ready": hycom_ready
     }
 
 @app.get("/current")
@@ -577,14 +567,11 @@ def forecast(
         }
 
 @app.get("/weather")
-def weather(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
+def weather(lat: float = Query(...), lon: float = Query(...)):
 
     data = fetch_weather_logic(lat, lon)
 
-    if data:
+    if data is not None and "hourly" in data:
         return {
             "status": "success",
             "weather": data
@@ -593,7 +580,6 @@ def weather(
     return {
         "status": "error"
     }
-
 @app.get("/routes")
 def routes():
 
@@ -602,17 +588,15 @@ def routes():
 # =========================================================
 # STARTUP
 # =========================================================
-
 @app.on_event("startup")
 def startup():
+    print("HYCOM loading...")
+
+    threading.Thread(target=load_hycom, daemon=True).start()
+
+    print("HYCOM thread started")
 
     init_db()
 
-    # HYCOMロード（初回）
-    threading.Thread(target=load_hycom, daemon=True).start()
-
-    # HYCOM監視
     threading.Thread(target=hycom_watchdog, daemon=True).start()
-
-    # 日跨ぎリセット
     threading.Thread(target=reset_daily_cache, daemon=True).start()
