@@ -140,49 +140,50 @@ def load_hycom():
         )
         ds_local = ds
         hycom_ready = True
-
         print("HYCOM loaded", flush=True)
-
     except Exception as e:
-
         hycom_ready = False
-
         print("HYCOM load error:", e, flush=True)
 # =========================================================
 # HYCOM WATCHDOG（追加）
 # =========================================================
 def hycom_watchdog():
-    global ds_local
-
+    global ds_local, hycom_ready
     while True:
         try:
-            import requests
+            test_ds = xr.open_dataset(
+                DATA_URL,
+                decode_times=False,
+                chunks={}
+            )
+            new_time_size = test_ds.sizes.get("time", 0)
 
-            r = requests.head(DATA_URL, timeout=10)
+            if ds_local is not None:
+                old_time_size = ds_local.sizes.get("time", 0)
 
-            if r.status_code != 200:
-                print("HYCOM not reachable")
-                time.sleep(6 * 3600)
-                continue
+                if new_time_size != old_time_size:
+                    print("🔄 HYCOM updated", flush=True)
+                    new_ds = xr.open_dataset(
+                        DATA_URL,
+                        engine="netcdf4",
+                        decode_times=False
+                    ).sel(
+                        lat=slice(30, 46),
+                        lon=slice(129, 146)
+                    )
 
-            if ds_local is None:
-                with lock:
-                    if ds_local is None:
-                        print("HYCOM initial loading...")
+                    old = ds_local
+                    ds_local = new_ds
 
-                        ds_local = xr.open_dataset(
-                            DATA_URL,
-                            decode_times=False
-                        ).sel(
-                            lat=slice(30, 46),
-                            lon=slice(129, 146)
-                        )
-
-                        print("HYCOM initial load done")
-
+                    hycom_ready = True
+                    try:
+                        old.close()
+                    except:
+                        pass
+            test_ds.close()
         except Exception as e:
-            print("HYCOM watch error:", e)
-
+            print("HYCOM not reachable", flush=True)
+        # 12時間ごと
         time.sleep(12 * 3600)
 # =========================================================
 # HYCOM CURRENT
@@ -592,15 +593,18 @@ def routes():
 # =========================================================
 @app.on_event("startup")
 def startup():
-
     init_db()
-
-    # watchdogだけ起動
+    # HYCOM初回ロード
+    threading.Thread(
+        target=load_hycom,
+        daemon=True
+    ).start()
+    # HYCOM監視
     threading.Thread(
         target=hycom_watchdog,
         daemon=True
     ).start()
-
+    # 日跨ぎリセット
     threading.Thread(
         target=reset_daily_cache,
         daemon=True
