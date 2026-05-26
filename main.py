@@ -101,19 +101,18 @@ def load_hycom():
     try:
         ds_local = xr.open_dataset(
             DATA_URL,
-            engine="netcdf4"
+            engine="netcdf4",
+            decode_times=False   # ← 超重要
         ).sel(
             lat=slice(30, 46),
             lon=slice(129, 146)
         )
 
         hycom_ready = True
-
         print("HYCOM ready", flush=True)
 
     except Exception as e:
         print("HYCOM load error:", e, flush=True)
-
 # =========================================================
 # HYCOM CURRENT
 # =========================================================
