@@ -37,15 +37,55 @@ session.headers.update({
 })
 
 # =========================================================
-# LOCK & CACHE
+# CACHE & LOCK
 # =========================================================
 
 lock = threading.Lock()
 
 umishiru_cache = {}
-
 forecast_cache = {}
-CACHE_TTL = 1800
+
+CACHE_TTL = 1800  # HYCOM / forecast
+
+last_hycom_signature = None
+
+# =========================================================
+# TIME UTIL
+# =========================================================
+
+from datetime import datetime, timedelta, timezone
+import time
+
+JST = timezone(timedelta(hours=9))
+
+
+def is_new_day(last_update: datetime):
+    now = datetime.now(JST)
+    return now.date() != last_update.date()
+
+
+# =========================================================
+# DAILY RESET (核心)
+# =========================================================
+
+def reset_daily_cache():
+    global umishiru_cache, forecast_cache
+
+    last_reset_day = None
+
+    while True:
+        now = datetime.now(JST)
+
+        if last_reset_day != now.date():
+            if now.hour == 0:
+                with lock:
+                    print("🔄 Daily cache reset")
+                    umishiru_cache = {}
+                    forecast_cache = {}
+
+                last_reset_day = now.date()
+
+        time.sleep(60)
 
 # =========================================================
 # HYCOM CONFIG
@@ -118,6 +158,48 @@ def load_hycom():
 
         print("HYCOM load error:", e, flush=True)
 
+# =========================================================
+# HYCOM WATCHDOG（追加）
+# =========================================================
+def hycom_watchdog():
+    global ds_local, hycom_ready
+
+    while True:
+        try:
+            new_ds = xr.open_dataset(
+                DATA_URL,
+                engine="netcdf4",
+                decode_times=False
+            ).sel(
+                lat=slice(30, 46),
+                lon=slice(129, 146)
+            )
+
+            # ★重要：先にメモリ確定
+            new_ds.load()
+
+            if ds_local is not None:
+                if new_ds.sizes["time"] != ds_local.sizes["time"]:
+                    print("🔄 HYCOM updated")
+
+                    old_ds = ds_local
+
+                    ds_local = new_ds
+                    hycom_ready = True
+
+                    # ★ここで安全にclose
+                    try:
+                        old_ds.close()
+                    except:
+                        pass
+            else:
+                ds_local = new_ds
+                hycom_ready = True
+
+        except Exception as e:
+            print("HYCOM watch error:", e)
+
+        time.sleep(6 * 3600)
 # =========================================================
 # HYCOM CURRENT
 # =========================================================
@@ -536,7 +618,11 @@ def startup():
 
     init_db()
 
-    threading.Thread(
-        target=load_hycom,
-        daemon=True
-    ).start()
+    # HYCOMロード（初回）
+    threading.Thread(target=load_hycom, daemon=True).start()
+
+    # HYCOM監視
+    threading.Thread(target=hycom_watchdog, daemon=True).start()
+
+    # 日跨ぎリセット
+    threading.Thread(target=reset_daily_cache, daemon=True).start()
