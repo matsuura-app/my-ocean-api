@@ -210,7 +210,130 @@ def fetch_weather_logic(lat, lon):
         pass
 
     return None
+# =========================================================
+# UMISHIRU
+# =========================================================
 
+def fetch_umishiru_hour(area_code, hour_offset):
+
+    try:
+
+        base_jst = datetime.now(JST).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        target = base_jst + timedelta(hours=hour_offset)
+
+        time_string = target.strftime("%Y%m%d%H%M")
+
+        url = "https://api.msil.go.jp/tidal-current-prediction/v3/data"
+
+        params = {
+            "areaCode": area_code,
+            "time": time_string,
+            "key": API_KEY
+        }
+
+        r = session.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+
+        features = data.get("features", [])
+
+        if not features:
+            return None
+
+        p = features[0].get("properties", {})
+
+        speed = float(
+            p.get("currentSpeedKt", 0.0) or 0.0
+        )
+
+        direction = float(
+            p.get("currentDirection", 0.0) or 0.0
+        )
+
+        return {
+            "time": hour_offset,
+            "speed": speed,
+            "direction": direction
+        }
+
+    except:
+        return None
+
+
+def fetch_48h_parallel(area_code):
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+
+        results = list(
+            executor.map(
+                lambda h: fetch_umishiru_hour(area_code, h),
+                range(48)
+            )
+        )
+
+    filtered = [r for r in results if r]
+
+    filtered.sort(key=lambda x: x["time"])
+
+    if not filtered:
+
+        return {
+            "status": "error",
+            "data": []
+        }
+
+    return {
+        "status": "success",
+        "data": filtered
+    }
+
+
+@app.get("/umishiru_forecast")
+def umishiru_forecast(
+    areaCode: str = Query(..., alias="areaCode")
+):
+
+    if not API_KEY:
+
+        return {
+            "status": "error",
+            "message": "MSIL_API_KEY missing"
+        }
+
+    now_jst = datetime.now(JST)
+
+    with lock:
+
+        cache = umishiru_cache.get(areaCode)
+
+        if cache and cache["expires"] > now_jst:
+            return cache["data"]
+
+    data = fetch_48h_parallel(areaCode)
+
+    if data["status"] == "success":
+
+        with lock:
+
+            umishiru_cache[areaCode] = {
+                "expires": now_jst + timedelta(hours=6),
+                "data": data
+            }
+
+    return data
 # =========================================================
 # API
 # =========================================================
