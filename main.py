@@ -96,23 +96,23 @@ def init_db():
 def load_hycom():
     global ds_local, hycom_ready
 
-    print("HYCOM loading...", flush=True)
+    print("HYCOM loading...")
 
     try:
         ds_local = xr.open_dataset(
             DATA_URL,
             engine="netcdf4",
-            decode_times=False   # ← 超重要
+            decode_times=False
         ).sel(
             lat=slice(30, 46),
             lon=slice(129, 146)
         )
 
         hycom_ready = True
-        print("HYCOM ready", flush=True)
+        print("HYCOM ready")
 
     except Exception as e:
-        print("HYCOM load error:", e, flush=True)
+        print("HYCOM load error:", e)
 # =========================================================
 # HYCOM CURRENT
 # =========================================================
@@ -163,11 +163,10 @@ def get_from_hycom(lat, lon):
 
 def generate_hycom_forecast(lat, lon):
 
-    point = ds_local.sel(
-        lat=lat,
-        lon=lon,
-        method="nearest"
-    )
+    subset = ds_local.sel(
+    　　　lat=slice(lat - 0.2, lat + 0.2),
+    　　　lon=slice(lon - 0.2, lon + 0.2)
+　　)
 
     results = []
 
@@ -435,45 +434,92 @@ def current(
     return get_from_hycom(lat, lon)
 
 @app.get("/forecast")
-def forecast(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
+def forecast(lat: float = Query(...), lon: float = Query(...)):
 
     if not hycom_ready or ds_local is None:
-        return {
-            "status": "loading",
-            "data": []
-        }
+        return {"status": "loading", "data": []}
 
     key = f"{round(lat,2)}_{round(lon,2)}"
-
     now = datetime.utcnow().timestamp()
 
-    with lock:
-
-        cache = forecast_cache.get(key)
-
-        if cache:
-
-            if now - cache["time"] < CACHE_TTL:
-                return cache["data"]
+    if key in forecast_cache:
+        cached = forecast_cache[key]
+        if now - cached["time"] < CACHE_TTL:
+            return cached["data"]
 
     try:
+        subset = ds_local.sel(
+            lat=slice(lat - 0.2, lat + 0.2),
+            lon=slice(lon - 0.2, lon + 0.2)
+        )
 
-        response = generate_hycom_forecast(lat, lon)
+        results = []
 
-        with lock:
+        utc_now = datetime.utcnow()
+        base_utc = utc_now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-            forecast_cache[key] = {
-                "time": now,
-                "data": response
-            }
+        hycom_start = datetime(2000, 1, 1)
+
+        first_time = float(ds_local["time"].values[0])
+
+        first_datetime = hycom_start + timedelta(hours=first_time)
+
+        offset_hours = int(
+            (base_utc - first_datetime).total_seconds() / 3600
+        )
+
+        for h in range(48):
+
+            idx_time = offset_hours + h
+
+            data = subset.isel(time=idx_time)
+
+            if "depth" in data.dims:
+                data = data.isel(depth=0)
+
+            u_array = data["water_u"].values
+            v_array = data["water_v"].values
+
+            valid = ~np.isnan(u_array) & ~np.isnan(v_array)
+
+            if not np.any(valid):
+                results.append({
+                    "time": h,
+                    "speed": 0.0,
+                    "direction": 0.0
+                })
+                continue
+
+            idx = np.argwhere(valid)[0]
+
+            u = float(u_array[idx[0], idx[1]])
+            v = float(v_array[idx[0], idx[1]])
+
+            speed = np.sqrt(u**2 + v**2) * 1.94384
+
+            direction = (
+                np.degrees(np.arctan2(v, u)) + 360
+            ) % 360
+
+            results.append({
+                "time": h,
+                "speed": round(speed, 2),
+                "direction": round(direction, 1)
+            })
+
+        response = {
+            "status": "success",
+            "data": results
+        }
+
+        forecast_cache[key] = {
+            "time": now,
+            "data": response
+        }
 
         return response
 
     except Exception as e:
-
         return {
             "status": "error",
             "message": str(e)
