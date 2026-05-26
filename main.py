@@ -135,7 +135,16 @@ def get_from_hycom(lat, lon):
         subset = ds_local.sel(
             lat=slice(lat - 0.2, lat + 0.2),
             lon=slice(lon - 0.2, lon + 0.2)
-        ).isel(time=0)
+        )
+
+        # time=0 取得時にFMRC壊れてると落ちる
+        try:
+            subset = subset.isel(time=0)
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"HYCOM time access error: {str(e)}"
+            }
 
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
@@ -175,7 +184,6 @@ def get_from_hycom(lat, lon):
             "status": "error",
             "message": str(e)
         }
-
 # =========================================================
 # WEATHER
 # =========================================================
@@ -390,7 +398,10 @@ def forecast(
 
         for h in range(min(48, max_time)):
 
+        try:
             data = subset.isel(time=h)
+        except:
+            continue
 
             if "depth" in data.dims:
                 data = data.isel(depth=0)
