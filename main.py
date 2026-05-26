@@ -166,35 +166,34 @@ def hycom_watchdog():
 
     while True:
         try:
-            new_ds = xr.open_dataset(
+            test_ds = xr.open_dataset(
                 DATA_URL,
-                engine="netcdf4",
-                decode_times=False
-            ).sel(
-                lat=slice(30, 46),
-                lon=slice(129, 146)
+                decode_times=False,
+                chunks={}
             )
 
-            # ★重要：先にメモリ確定
-            new_ds.load()
+            # 軽いメタ情報だけ見る
+            new_time_size = test_ds.sizes.get("time", 0)
 
-            if ds_local is not None:
-                if new_ds.sizes["time"] != ds_local.sizes["time"]:
+            if ds_local is None:
+                ds_local = test_ds.sel(lat=slice(30,46), lon=slice(129,146))
+                hycom_ready = True
+
+            else:
+                old_time_size = ds_local.sizes.get("time", 0)
+
+                if new_time_size != old_time_size:
                     print("🔄 HYCOM updated")
 
-                    old_ds = ds_local
+                    old = ds_local
 
-                    ds_local = new_ds
+                    ds_local = test_ds.sel(lat=slice(30,46), lon=slice(129,146))
                     hycom_ready = True
 
-                    # ★ここで安全にclose
                     try:
-                        old_ds.close()
+                        old.close()
                     except:
                         pass
-            else:
-                ds_local = new_ds
-                hycom_ready = True
 
         except Exception as e:
             print("HYCOM watch error:", e)
