@@ -94,11 +94,13 @@ def init_db():
 # =========================================================
 
 def load_hycom():
+
     global ds_local, hycom_ready
 
-    print("HYCOM loading...")
+    print("HYCOM loading...", flush=True)
 
     try:
+
         ds_local = xr.open_dataset(
             DATA_URL,
             engine="netcdf4",
@@ -109,20 +111,27 @@ def load_hycom():
         )
 
         hycom_ready = True
-        print("HYCOM ready")
+
+        print("HYCOM ready", flush=True)
 
     except Exception as e:
-        print("HYCOM load error:", e)
+
+        print("HYCOM load error:", e, flush=True)
+
 # =========================================================
 # HYCOM CURRENT
 # =========================================================
 
 def get_from_hycom(lat, lon):
+
     if not hycom_ready or ds_local is None:
-        return {"status": "loading", "message": "HYCOM initializing"}
+        return {
+            "status": "loading",
+            "message": "HYCOM initializing"
+        }
 
     try:
-        # 周辺を少し広めに取得
+
         subset = ds_local.sel(
             lat=slice(lat - 0.2, lat + 0.2),
             lon=slice(lon - 0.2, lon + 0.2)
@@ -134,19 +143,24 @@ def get_from_hycom(lat, lon):
         u_array = subset["water_u"].values
         v_array = subset["water_v"].values
 
-        # 有効な海セルを探す
         valid = ~np.isnan(u_array) & ~np.isnan(v_array)
 
         if not np.any(valid):
-            return {"status": "error", "message": "land"}
+            return {
+                "status": "error",
+                "message": "land"
+            }
 
-        # 最初の有効セル
         idx = np.argwhere(valid)[0]
+
         u = float(u_array[idx[0], idx[1]])
         v = float(v_array[idx[0], idx[1]])
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
-        direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
+
+        direction = (
+            np.degrees(np.arctan2(v, u)) + 360
+        ) % 360
 
         return {
             "status": "success",
@@ -156,54 +170,11 @@ def get_from_hycom(lat, lon):
         }
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
-# =========================================================
-# HYCOM FORECAST
-# =========================================================
 
-def generate_hycom_forecast(lat, lon):
-
-    subset = ds_local.sel(
-    　　　lat=slice(lat - 0.2, lat + 0.2),
-    　　　lon=slice(lon - 0.2, lon + 0.2)
-　　)
-
-    results = []
-
-    for h in range(48):
-
-        subset = point.isel(time=h)
-
-        if "depth" in subset.dims:
-            subset = subset.isel(depth=0)
-
-        u = float(subset["water_u"].values)
-        v = float(subset["water_v"].values)
-
-        if np.isnan(u) or np.isnan(v):
-            results.append({
-                "time": h,
-                "speed": 0.0,
-                "direction": 0.0
-            })
-            continue
-
-        speed = np.sqrt(u**2 + v**2) * 1.94384
-
-        direction = (
-            np.degrees(np.arctan2(v, u)) + 360
-        ) % 360
-
-        results.append({
-            "time": h,
-            "speed": round(speed, 2),
-            "direction": round(direction, 1)
-        })
-
-    return {
-        "status": "success",
-        "data": results
-    }
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 # =========================================================
 # WEATHER
@@ -225,6 +196,7 @@ def fetch_weather_logic(lat, lon):
     }
 
     try:
+
         r = session.get(
             "https://api.open-meteo.com/v1/forecast",
             params=params,
@@ -240,187 +212,12 @@ def fetch_weather_logic(lat, lon):
     return None
 
 # =========================================================
-# UMISHIRU
-# =========================================================
-
-def fetch_umishiru_hour(area_code, hour_offset):
-
-    try:
-        base_jst = datetime.now(JST).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0
-        )
-
-        target = base_jst + timedelta(hours=hour_offset)
-
-        time_string = target.strftime("%Y%m%d%H%M")
-
-        url = "https://api.msil.go.jp/tidal-current-prediction/v3/data"
-
-        params = {
-            "areaCode": area_code,
-            "time": time_string,
-            "key": API_KEY
-        }
-
-        r = session.get(
-            url,
-            params=params,
-            timeout=10
-        )
-
-        if r.status_code != 200:
-            return None
-
-        data = r.json()
-
-        features = data.get("features", [])
-
-        if not features:
-            return None
-
-        p = features[0].get("properties", {})
-
-        speed = float(
-            p.get("currentSpeedKt", 0.0) or 0.0
-        )
-
-        direction = float(
-            p.get("currentDirection", 0.0) or 0.0
-        )
-
-        return {
-            "time": hour_offset,
-            "speed": speed,
-            "direction": direction
-        }
-
-    except:
-        return None
-
-def fetch_48h_parallel(area_code):
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-
-        results = list(
-            executor.map(
-                lambda h: fetch_umishiru_hour(area_code, h),
-                range(48)
-            )
-        )
-
-    filtered = [r for r in results if r]
-
-    filtered.sort(key=lambda x: x["time"])
-
-    if not filtered:
-        return {
-            "status": "error",
-            "data": []
-        }
-
-    return {
-        "status": "success",
-        "data": filtered
-    }
-
-# =========================================================
-# JMA TIDE
-# =========================================================
-
-def fetch_and_save_jma_year(point_code, year):
-
-    station_map = {
-        "kure": "Q9",
-        "tokyo": "TK",
-        "osaka": "OS"
-    }
-
-    jma_code = station_map.get(
-        point_code.lower(),
-        point_code.upper()
-    )
-
-    url = (
-        "https://www.data.jma.go.jp/"
-        f"kaiyou/data/db/tide/suisan/txt/{year}/{jma_code}.txt"
-    )
-
-    try:
-        r = requests.get(url, timeout=15)
-
-        if r.status_code != 200:
-            return False
-
-        lines = r.text.splitlines()
-
-        conn = get_conn()
-        cur = conn.cursor()
-
-        for line in lines:
-
-            if len(line) < 72:
-                continue
-
-            try:
-                line_year = 2000 + int(line[72:74])
-                line_month = int(line[74:76])
-                line_day = int(line[76:78])
-
-            except:
-                continue
-
-            hourly_part = line[0:72]
-
-            for hour in range(24):
-
-                start_idx = hour * 3
-
-                height_str = hourly_part[
-                    start_idx:start_idx+3
-                ].strip()
-
-                if not height_str:
-                    continue
-
-                try:
-                    height = float(height_str)
-
-                except:
-                    continue
-
-                dt_str = (
-                    f"{line_year}-{line_month:02d}-"
-                    f"{line_day:02d} {hour:02d}:00:00"
-                )
-
-                cur.execute("""
-                    INSERT OR REPLACE INTO tides
-                    (point, datetime, height)
-                    VALUES (?, ?, ?)
-                """, (
-                    jma_code,
-                    dt_str,
-                    height
-                ))
-
-        conn.commit()
-        conn.close()
-
-        return True
-
-    except Exception as e:
-        print("JMA error:", e, flush=True)
-        return False
-
-# =========================================================
 # API
 # =========================================================
 
 @app.get("/")
 def root():
+
     return {
         "status": "ok",
         "server": "marine-final"
@@ -431,23 +228,34 @@ def current(
     lat: float = Query(...),
     lon: float = Query(...)
 ):
+
     return get_from_hycom(lat, lon)
 
 @app.get("/forecast")
-def forecast(lat: float = Query(...), lon: float = Query(...)):
+def forecast(
+    lat: float = Query(...),
+    lon: float = Query(...)
+):
 
     if not hycom_ready or ds_local is None:
-        return {"status": "loading", "data": []}
+        return {
+            "status": "loading",
+            "data": []
+        }
 
     key = f"{round(lat,2)}_{round(lon,2)}"
+
     now = datetime.utcnow().timestamp()
 
-    if key in forecast_cache:
-        cached = forecast_cache[key]
-        if now - cached["time"] < CACHE_TTL:
-            return cached["data"]
+    with lock:
+
+        cache = forecast_cache.get(key)
+
+        if cache and now - cache["time"] < CACHE_TTL:
+            return cache["data"]
 
     try:
+
         subset = ds_local.sel(
             lat=slice(lat - 0.2, lat + 0.2),
             lon=slice(lon - 0.2, lon + 0.2)
@@ -455,24 +263,11 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
 
         results = []
 
-        utc_now = datetime.utcnow()
-        base_utc = utc_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        max_time = subset.sizes["time"]
 
-        hycom_start = datetime(2000, 1, 1)
+        for h in range(min(48, max_time)):
 
-        first_time = float(ds_local["time"].values[0])
-
-        first_datetime = hycom_start + timedelta(hours=first_time)
-
-        offset_hours = int(
-            (base_utc - first_datetime).total_seconds() / 3600
-        )
-
-        for h in range(48):
-
-            idx_time = offset_hours + h
-
-            data = subset.isel(time=idx_time)
+            data = subset.isel(time=h)
 
             if "depth" in data.dims:
                 data = data.isel(depth=0)
@@ -483,11 +278,13 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
             valid = ~np.isnan(u_array) & ~np.isnan(v_array)
 
             if not np.any(valid):
+
                 results.append({
                     "time": h,
                     "speed": 0.0,
                     "direction": 0.0
                 })
+
                 continue
 
             idx = np.argwhere(valid)[0]
@@ -512,14 +309,17 @@ def forecast(lat: float = Query(...), lon: float = Query(...)):
             "data": results
         }
 
-        forecast_cache[key] = {
-            "time": now,
-            "data": response
-        }
+        with lock:
+
+            forecast_cache[key] = {
+                "time": now,
+                "data": response
+            }
 
         return response
 
     except Exception as e:
+
         return {
             "status": "error",
             "message": str(e)
@@ -543,76 +343,9 @@ def weather(
         "status": "error"
     }
 
-@app.get("/umishiru_forecast")
-def umishiru_forecast(
-    areaCode: str = Query(..., alias="areaCode")
-):
-
-    if not API_KEY:
-        return {
-            "status": "error",
-            "message": "MSIL_API_KEY missing"
-        }
-
-    now_jst = datetime.now(JST)
-
-    with lock:
-
-        cache = umishiru_cache.get(areaCode)
-
-        if cache and cache["expires"] > now_jst:
-            return cache["data"]
-
-    data = fetch_48h_parallel(areaCode)
-
-    if data["status"] == "success":
-
-        with lock:
-
-            umishiru_cache[areaCode] = {
-                "expires": now_jst + timedelta(hours=6),
-                "data": data
-            }
-
-    return data
-
-@app.get("/tide")
-def tide(point: str):
-
-    now = datetime.now(JST)
-
-    current_year = now.year
-
-    fetch_and_save_jma_year(point, current_year)
-
-    conn = get_conn()
-
-    cur = conn.cursor()
-
-    rows = cur.execute("""
-        SELECT datetime, height
-        FROM tides
-        WHERE point = ?
-        ORDER BY datetime ASC
-    """, (
-        point.upper(),
-    )).fetchall()
-
-    conn.close()
-
-    return {
-        "status": "success",
-        "data": [
-            {
-                "time": r["datetime"],
-                "height": r["height"]
-            }
-            for r in rows
-        ]
-    }
-
 @app.get("/routes")
 def routes():
+
     return [route.path for route in app.routes]
 
 # =========================================================
