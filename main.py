@@ -127,12 +127,10 @@ def init_db():
 # HYCOM LOAD
 # =========================================================
 def load_hycom():
-    global ds_local
-
+    global ds_local, hycom_ready
+    print("HYCOM loading...", flush=True)
     try:
-        print("HYCOM loading...", flush=True)
-
-        ds_local = xr.open_dataset(
+        ds = xr.open_dataset(
             DATA_URL,
             engine="netcdf4",
             decode_times=False
@@ -140,12 +138,16 @@ def load_hycom():
             lat=slice(30, 46),
             lon=slice(129, 146)
         )
+        ds_local = ds
+        hycom_ready = True
 
         print("HYCOM loaded", flush=True)
 
     except Exception as e:
-        print("HYCOM load error:", e, flush=True)
 
+        hycom_ready = False
+
+        print("HYCOM load error:", e, flush=True)
 # =========================================================
 # HYCOM WATCHDOG（追加）
 # =========================================================
