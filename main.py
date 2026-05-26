@@ -396,48 +396,47 @@ def forecast(
 
         max_time = subset.sizes["time"]
 
-        for h in range(min(48, max_time)):
+    for h in range(min(48, max_time)):
 
-        try:
-            data = subset.isel(time=h)
-        except:
-            continue
+       try:
+           data = subset.isel(time=h)
+       except:
+           continue
 
-            if "depth" in data.dims:
-                data = data.isel(depth=0)
+       if "depth" in data.dims:
+           data = data.isel(depth=0)
 
-            u_array = data["water_u"].values
-            v_array = data["water_v"].values
+       u_array = data["water_u"].values
+       v_array = data["water_v"].values
 
-            valid = ~np.isnan(u_array) & ~np.isnan(v_array)
+       valid = ~np.isnan(u_array) & ~np.isnan(v_array)
 
-            if not np.any(valid):
+       if not np.any(valid):
 
-                results.append({
-                    "time": h,
-                    "speed": 0.0,
-                    "direction": 0.0
-                })
+           results.append({
+               "time": h,
+               "speed": 0.0,
+               "direction": 0.0
+           })
 
-                continue
+           continue
 
-            idx = np.argwhere(valid)[0]
+       idx = np.argwhere(valid)[0]
 
-            u = float(u_array[idx[0], idx[1]])
-            v = float(v_array[idx[0], idx[1]])
+       u = float(u_array[idx[0], idx[1]])
+       v = float(v_array[idx[0], idx[1]])
 
-            speed = np.sqrt(u**2 + v**2) * 1.94384
+       speed = np.sqrt(u**2 + v**2) * 1.94384
 
-            direction = (
-                np.degrees(np.arctan2(v, u)) + 360
-            ) % 360
+       direction = (
+           np.degrees(np.arctan2(v, u)) + 360
+       ) % 360
 
-            results.append({
-                "time": h,
-                "speed": round(speed, 2),
-                "direction": round(direction, 1)
-            })
-
+       results.append({
+           "time": h,
+           "speed": round(speed, 2),
+           "direction": round(direction, 1)
+       })
         response = {
             "status": "success",
             "data": results
