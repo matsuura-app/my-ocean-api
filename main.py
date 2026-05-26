@@ -394,7 +394,7 @@ def forecast(
 
         results = []
 
-                max_time = subset.sizes["time"]
+        max_time = subset.sizes["time"]
 
         for h in range(min(48, max_time)):
 
@@ -437,6 +437,7 @@ def forecast(
                 "speed": round(speed, 2),
                 "direction": round(direction, 1)
             })
+
         response = {
             "status": "success",
             "data": results
