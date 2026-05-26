@@ -118,36 +118,35 @@ def load_hycom():
 # =========================================================
 
 def get_from_hycom(lat, lon):
-
     if not hycom_ready or ds_local is None:
-        return {
-            "status": "loading"
-        }
+        return {"status": "loading", "message": "HYCOM initializing"}
 
     try:
+        # 周辺を少し広めに取得
         subset = ds_local.sel(
-            lat=lat,
-            lon=lon,
-            method="nearest"
+            lat=slice(lat - 0.2, lat + 0.2),
+            lon=slice(lon - 0.2, lon + 0.2)
         ).isel(time=0)
 
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
 
-        u = float(subset["water_u"].values)
-        v = float(subset["water_v"].values)
+        u_array = subset["water_u"].values
+        v_array = subset["water_v"].values
 
-        if np.isnan(u) or np.isnan(v):
-            return {
-                "status": "error",
-                "message": "land"
-            }
+        # 有効な海セルを探す
+        valid = ~np.isnan(u_array) & ~np.isnan(v_array)
+
+        if not np.any(valid):
+            return {"status": "error", "message": "land"}
+
+        # 最初の有効セル
+        idx = np.argwhere(valid)[0]
+        u = float(u_array[idx[0], idx[1]])
+        v = float(v_array[idx[0], idx[1]])
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
-
-        direction = (
-            np.degrees(np.arctan2(v, u)) + 360
-        ) % 360
+        direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
 
         return {
             "status": "success",
@@ -157,11 +156,7 @@ def get_from_hycom(lat, lon):
         }
 
     except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-
+        return {"status": "error", "message": str(e)}
 # =========================================================
 # HYCOM FORECAST
 # =========================================================
