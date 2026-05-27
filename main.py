@@ -45,8 +45,8 @@ lock = threading.Lock()
 umishiru_cache = {}
 forecast_cache = {}
 
-CACHE_TTL = 1800  # HYCOM / forecast
-
+CACHE_TTL = 21600  # HYCOM / forecast
+forecast_refreshing = set()
 last_hycom_signature = None
 
 # =========================================================
@@ -145,24 +145,56 @@ def load_hycom():
         hycom_ready = False
         print("HYCOM load error:", e, flush=True)
 # =========================================================
-# HYCOM WATCHDOG（追加）
+# HYCOM WATCHDOG
 # =========================================================
 def hycom_watchdog():
     global ds_local, hycom_ready
     while True:
+        test_ds = None
+        old_ds = None
         try:
+            # 軽量チェック
             test_ds = xr.open_dataset(
                 DATA_URL,
                 decode_times=False,
                 chunks={}
             )
-            new_time_size = test_ds.sizes.get("time", 0)
-
-            if ds_local is not None:
-                old_time_size = ds_local.sizes.get("time", 0)
-
+            new_time_size = test_ds.sizes.get(
+                "time",
+                0
+            )
+            # =================================================
+            # 初回復旧
+            # =================================================
+            if ds_local is None:
+                print(
+                    "HYCOM first load from watchdog",
+                    flush=True
+                )
+                new_ds = xr.open_dataset(
+                    DATA_URL,
+                    engine="netcdf4",
+                    decode_times=False
+                ).sel(
+                    lat=slice(30, 46),
+                    lon=slice(129, 146)
+                )
+                with lock:
+                    ds_local = new_ds
+                    hycom_ready = True
+            # =================================================
+            # 更新検知
+            # =================================================
+            else:
+                old_time_size = ds_local.sizes.get(
+                    "time",
+                    0
+                )
                 if new_time_size != old_time_size:
-                    print("🔄 HYCOM updated", flush=True)
+                    print(
+                        "🔄 HYCOM updated",
+                        flush=True
+                    )
                     new_ds = xr.open_dataset(
                         DATA_URL,
                         engine="netcdf4",
@@ -171,18 +203,29 @@ def hycom_watchdog():
                         lat=slice(30, 46),
                         lon=slice(129, 146)
                     )
-
-                    old = ds_local
-                    ds_local = new_ds
-
-                    hycom_ready = True
-                    try:
-                        old.close()
-                    except:
-                        pass
-            test_ds.close()
+                    with lock:
+                        old_ds = ds_local
+                        ds_local = new_ds
+                        hycom_ready = True
+                    # 少し待ってから閉じる
+                    time.sleep(5)
+                    if old_ds is not None:
+                        try:
+                            old_ds.close()
+                        except Exception:
+                            pass
         except Exception as e:
-            print("HYCOM not reachable", flush=True)
+            hycom_ready = False
+            print(
+                f"HYCOM not reachable: {e}",
+                flush=True
+            )
+        finally:
+            if test_ds is not None:
+                try:
+                    test_ds.close()
+                except Exception:
+                    pass
         # 12時間ごと
         time.sleep(12 * 3600)
 # =========================================================
@@ -342,7 +385,8 @@ def fetch_umishiru_hour(area_code, hour_offset):
             "direction": direction
         }
 
-    except:
+    except Exception as e:
+        print(f"umishiru fetch error: {e}")
         return None
 
 
@@ -489,86 +533,158 @@ def forecast(
     now = datetime.utcnow().timestamp()
 
     with lock:
-
         cache = forecast_cache.get(key)
 
-        if cache and now - cache["time"] < CACHE_TTL:
-            return cache["data"]
+    # =====================================================
+    # キャッシュ存在時
+    # =====================================================
 
+    if cache:
+        cached_data = cache["data"]
+        # TTL切れなら裏更新
+        if now - cache["time"] >= CACHE_TTL:
+            with lock:
+                already_refreshing = (
+                    key in forecast_refreshing
+                )
+                if not already_refreshing:
+                    forecast_refreshing.add(key)
+            if not already_refreshing:
+                def refresh():
+                    global ds_local
+                    try:
+                        subset = ds_local.sel(
+                            lat=slice(lat - 0.2, lat + 0.2),
+                            lon=slice(lon - 0.2, lon + 0.2)
+                        )
+                        results = []
+                        max_time = subset.sizes["time"]
+                        for h in range(min(48, max_time)):
+                            try:
+                                data = subset.isel(time=h)
+                            except Exception:
+                                continue
+
+                            if "depth" in data.dims:
+                                data = data.isel(depth=0)
+
+                            u_array = data["water_u"].values
+                            v_array = data["water_v"].values
+
+                            valid = (
+                                ~np.isnan(u_array)
+                                & ~np.isnan(v_array)
+                            )
+
+                            if not np.any(valid):
+                                results.append({
+                                    "time": h,
+                                    "speed": 0.0,
+                                    "direction": 0.0
+                                })
+                                continue
+                            idx = np.argwhere(valid)[0]
+                            u = float(
+                                u_array[idx[0], idx[1]]
+                            )
+                            v = float(
+                                v_array[idx[0], idx[1]]
+                            )
+                            speed = (
+                                np.sqrt(u**2 + v**2)
+                                * 1.94384
+                            )
+                            direction = (
+                                np.degrees(
+                                    np.arctan2(v, u)
+                                ) + 360
+                            ) % 360
+                            results.append({
+                                "time": h,
+                                "speed": round(speed, 2),
+                                "direction": round(direction, 1)
+                            })
+                        response = {
+                            "status": "success",
+                            "data": results
+                        }
+                        with lock:
+                            forecast_cache[key] = {
+                                "time": datetime.utcnow().timestamp(),
+                                "data": response
+                            }
+                        print(
+                            f"Forecast refreshed: {key}",
+                            flush=True
+                        )
+                    except Exception as e:
+                        print(
+                            f"Forecast refresh error: {e}",
+                            flush=True
+                        )
+                    finally:
+                        with lock:
+                            forecast_refreshing.discard(key)
+                threading.Thread(
+                    target=refresh,
+                    daemon=True
+                ).start()
+        return cached_data
+    # =====================================================
+    # 初回取得
+    # =====================================================
     try:
-
         subset = ds_local.sel(
             lat=slice(lat - 0.2, lat + 0.2),
             lon=slice(lon - 0.2, lon + 0.2)
         )
-
         results = []
-
         max_time = subset.sizes["time"]
-
         for h in range(min(48, max_time)):
-
             try:
                 data = subset.isel(time=h)
             except Exception:
                 continue
-
             if "depth" in data.dims:
                 data = data.isel(depth=0)
-
             u_array = data["water_u"].values
             v_array = data["water_v"].values
-
             valid = ~np.isnan(u_array) & ~np.isnan(v_array)
-
             if not np.any(valid):
-
                 results.append({
                     "time": h,
                     "speed": 0.0,
                     "direction": 0.0
                 })
-
                 continue
-
             idx = np.argwhere(valid)[0]
-
             u = float(u_array[idx[0], idx[1]])
             v = float(v_array[idx[0], idx[1]])
-
             speed = np.sqrt(u**2 + v**2) * 1.94384
-
             direction = (
                 np.degrees(np.arctan2(v, u)) + 360
             ) % 360
-
             results.append({
                 "time": h,
                 "speed": round(speed, 2),
                 "direction": round(direction, 1)
             })
-
         response = {
             "status": "success",
             "data": results
         }
-
         with lock:
-
             forecast_cache[key] = {
                 "time": now,
                 "data": response
             }
-
         return response
-
     except Exception as e:
-
         return {
             "status": "error",
             "message": str(e)
         }
-
+        
 @app.get("/weather")
 def weather(lat: float = Query(...), lon: float = Query(...)):
 
