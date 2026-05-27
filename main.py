@@ -264,8 +264,7 @@ def hycom_watchdog():
             # 軽量チェック
             test_ds = xr.open_dataset(
                 DATA_URL,
-                decode_times=False,
-                chunks={}
+                decode_times=False
             )
             new_time_size = test_ds.sizes.get(
                 "time",
