@@ -122,7 +122,115 @@ def init_db():
 
     conn.commit()
     conn.close()
+# =========================================================
+# TIDE CONFIG
+# =========================================================
+tide_cache = {}
+tide_refreshing = set()
 
+TIDE_CACHE_TTL = 86400  # 24h
+# =========================================================
+# JMA TIDE
+# =========================================================
+def fetch_and_save_jma_year(point_code: str, year: int):
+    station_map = {
+        "kure": "Q9",
+        "tokyo": "TK",
+        "osaka": "OS",
+    }
+    jma_code = station_map.get(
+        point_code.lower(),
+        point_code.upper()
+    )
+    url = (
+        "https://www.data.jma.go.jp/"
+        f"kaiyou/data/db/tide/suisan/txt/{year}/{jma_code}.txt"
+    )
+    print(f"Fetching JMA tide: {url}", flush=True)
+    try:
+        r = session.get(url, timeout=20)
+        if r.status_code != 200:
+            print(
+                f"JMA fetch failed: {r.status_code}",
+                flush=True
+            )
+            return False
+        lines = r.text.splitlines()
+        conn = get_conn()
+        cur = conn.cursor()
+        saved = 0
+        for line in lines:
+            if len(line) < 78:
+                continue
+            try:
+                yy = int(line[72:74])
+                mm = int(line[74:76])
+                dd = int(line[76:78])
+                year_full = 2000 + yy
+            except Exception:
+                continue
+            hourly = line[:72]
+            for hour in range(24):
+                idx = hour * 3
+                value = hourly[idx:idx+3].strip()
+                if not value:
+                    continue
+                try:
+                    height = float(value)
+                except Exception:
+                    continue
+                dt = (
+                    f"{year_full}-"
+                    f"{mm:02d}-"
+                    f"{dd:02d} "
+                    f"{hour:02d}:00:00"
+                )
+                cur.execute("""
+                    INSERT OR REPLACE INTO tides
+                    (point, datetime, height)
+                    VALUES (?, ?, ?)
+                """, (
+                    jma_code,
+                    dt,
+                    height
+                ))
+                saved += 1
+        conn.commit()
+        conn.close()
+
+        print(
+            f"Saved {saved} tide rows",
+            flush=True
+        )
+        return True
+    except Exception as e:
+        print(f"JMA tide error: {e}", flush=True)
+        return False
+
+def cleanup_old_tides(current_year: int):
+    threshold_year = current_year - 1
+    threshold = (
+        f"{threshold_year}-01-01 00:00:00"
+    )
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            DELETE FROM tides
+            WHERE datetime < ?
+        """, (threshold,))
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        print(
+            f"Deleted old tides: {deleted}",
+            flush=True
+        )
+    except Exception as e:
+        print(
+            f"Tide cleanup error: {e}",
+            flush=True
+        )
 # =========================================================
 # HYCOM LOAD
 # =========================================================
@@ -231,17 +339,13 @@ def hycom_watchdog():
 # =========================================================
 # HYCOM CURRENT
 # =========================================================
-
 def get_from_hycom(lat, lon):
-
     if ds_local is None:
         return {
             "status": "loading",
             "message": "HYCOM initializing"
         }
-
     try:
-
         subset = ds_local.sel(
             lat=slice(lat - 0.2, lat + 0.2),
             lon=slice(lon - 0.2, lon + 0.2)
@@ -287,9 +391,7 @@ def get_from_hycom(lat, lon):
             "direction": round(direction, 1),
             "source": "HYCOM"
         }
-
     except Exception as e:
-
         return {
             "status": "error",
             "message": str(e)
@@ -297,9 +399,7 @@ def get_from_hycom(lat, lon):
 # =========================================================
 # WEATHER
 # =========================================================
-
 def fetch_weather_logic(lat, lon):
-
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -312,14 +412,12 @@ def fetch_weather_logic(lat, lon):
         "forecast_days": 7,
         "timezone": "Asia/Tokyo"
     }
-
     try:
         r = session.get(
             "https://api.open-meteo.com/v1/forecast",
             params=params,
             timeout=10
         )
-
         if r.status_code == 200:
             return r.json()
 
@@ -329,11 +427,8 @@ def fetch_weather_logic(lat, lon):
 # =========================================================
 # UMISHIRU
 # =========================================================
-
 def fetch_umishiru_hour(area_code, hour_offset):
-
     try:
-
         base_jst = datetime.now(JST).replace(
             hour=0,
             minute=0,
@@ -368,55 +463,41 @@ def fetch_umishiru_hour(area_code, hour_offset):
 
         if not features:
             return None
-
         p = features[0].get("properties", {})
-
         speed = float(
             p.get("currentSpeedKt", 0.0) or 0.0
         )
-
         direction = float(
             p.get("currentDirection", 0.0) or 0.0
         )
-
         return {
             "time": hour_offset,
             "speed": speed,
             "direction": direction
         }
-
     except Exception as e:
         print(f"umishiru fetch error: {e}")
         return None
 
-
 def fetch_48h_parallel(area_code):
-
     with ThreadPoolExecutor(max_workers=8) as executor:
-
         results = list(
             executor.map(
                 lambda h: fetch_umishiru_hour(area_code, h),
                 range(48)
             )
         )
-
     filtered = [r for r in results if r]
-
     filtered.sort(key=lambda x: x["time"])
-
     if not filtered:
-
         return {
             "status": "error",
             "data": []
         }
-
     return {
         "status": "success",
         "data": filtered
     }
-
 
 @app.get("/umishiru_forecast")
 def umishiru_forecast(
@@ -437,69 +518,50 @@ def umishiru_forecast(
     # =====================================================
     # キャッシュ存在時
     # =====================================================
-
     if cache:
-
         # まず古いデータでも即返す
         cached_data = cache["data"]
-
         # 期限切れなら裏更新
         if cache["expires"] <= now_jst:
-
             def refresh():
-
                 try:
-
                     new_data = fetch_48h_parallel(areaCode)
-
                     if new_data["status"] == "success":
-
                         with lock:
-
                             umishiru_cache[areaCode] = {
                                 "expires": now_jst + timedelta(hours=6),
                                 "data": new_data
                             }
-
                         print(
                             f"Umishiru refreshed: {areaCode}",
                             flush=True
                         )
-
                 except Exception as e:
 
                     print(
                         f"Umishiru refresh error: {e}",
                         flush=True
                     )
-
             threading.Thread(
                 target=refresh,
                 daemon=True
             ).start()
-
         return cached_data
 
     # =====================================================
     # 初回取得
     # =====================================================
-
     data = fetch_48h_parallel(areaCode)
-
     if data["status"] == "success":
-
         with lock:
-
             umishiru_cache[areaCode] = {
                 "expires": now_jst + timedelta(hours=6),
                 "data": data
             }
-
     return data
 # =========================================================
 # API
 # =========================================================
-
 @app.get("/")
 def root():
     return {
@@ -538,7 +600,6 @@ def forecast(
     # =====================================================
     # キャッシュ存在時
     # =====================================================
-
     if cache:
         cached_data = cache["data"]
         # TTL切れなら裏更新
@@ -703,13 +764,102 @@ def weather(lat: float = Query(...), lon: float = Query(...)):
 def routes():
 
     return [route.path for route in app.routes]
-
+# =========================================================
+# TIDE API
+# =========================================================
+@app.get("/tide")
+def tide(
+    point: str = Query(...)
+):
+    now = datetime.utcnow()
+    current_year = now.year
+    station_map = {
+        "kure": "Q9",
+        "tokyo": "TK",
+        "osaka": "OS",
+    }
+    jma_code = station_map.get(
+        point.lower(),
+        point.upper()
+    )
+    cleanup_old_tides(current_year)
+    start_dt = now - timedelta(days=180)
+    end_dt = now + timedelta(days=545)
+    start_str = start_dt.strftime(
+        "%Y-%m-%d 00:00:00"
+    )
+    end_str = end_dt.strftime(
+        "%Y-%m-%d 23:59:59"
+    )
+    conn = get_conn()
+    cur = conn.cursor()
+    rows = cur.execute("""
+        SELECT datetime, height
+        FROM tides
+        WHERE point = ?
+        AND datetime BETWEEN ? AND ?
+        ORDER BY datetime ASC
+    """, (
+        jma_code,
+        start_str,
+        end_str
+    )).fetchall()
+    conn.close()
+    # =====================================================
+    # データ不足なら同期
+    # =====================================================
+    if len(rows) < 15000:
+        print(
+            f"Syncing JMA tide for {jma_code}",
+            flush=True
+        )
+        fetch_and_save_jma_year(
+            jma_code,
+            current_year - 1
+        )
+        fetch_and_save_jma_year(
+            jma_code,
+            current_year
+        )
+        fetch_and_save_jma_year(
+            jma_code,
+            current_year + 1
+        )
+        conn = get_conn()
+        cur = conn.cursor()
+        rows = cur.execute("""
+            SELECT datetime, height
+            FROM tides
+            WHERE point = ?
+            AND datetime BETWEEN ? AND ?
+            ORDER BY datetime ASC
+        """, (
+            jma_code,
+            start_str,
+            end_str
+        )).fetchall()
+        conn.close()
+    return {
+        "status": "success",
+        "point": jma_code,
+        "total_records": len(rows),
+        "range_start": start_str,
+        "range_end": end_str,
+        "data": [
+            {
+                "time": r["datetime"],
+                "height": r["height"]
+            }
+            for r in rows
+        ]
+    }
 # =========================================================
 # STARTUP
 # =========================================================
 @app.on_event("startup")
 def startup():
     init_db()
+    os.makedirs("data", exist_ok=True)
     # HYCOM初回ロード
     threading.Thread(
         target=load_hycom,
