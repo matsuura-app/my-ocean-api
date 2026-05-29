@@ -43,12 +43,16 @@ session.headers.update({
 
 lock = threading.Lock()
 
+# キャッシュ
 umishiru_cache = {}
-
 forecast_cache = {}
+
+# 更新中管理
+umishiru_refreshing = set()
 forecast_refreshing = set()
 
-CACHE_TTL = 21600  # 6h
+# 6時間
+CACHE_TTL = 21600
 
 # =========================================================
 # HYCOM CONFIG
@@ -107,13 +111,15 @@ def load_hycom():
         ds = xr.open_dataset(
             DATA_URL,
             engine="netcdf4",
-            decode_times=False
+            decode_times=False,
+            chunks={}
         ).sel(
             lat=slice(30, 46),
             lon=slice(129, 146)
         )
 
         with lock:
+
             ds_local = ds
             hycom_ready = True
 
@@ -144,9 +150,9 @@ def hycom_watchdog():
 
         try:
 
-            # 軽量チェック
             test_ds = xr.open_dataset(
                 DATA_URL,
+                engine="netcdf4",
                 decode_times=False
             )
 
@@ -155,10 +161,7 @@ def hycom_watchdog():
                 0
             )
 
-            # =================================================
             # 初回復旧
-            # =================================================
-
             if ds_local is None:
 
                 print(
@@ -169,7 +172,8 @@ def hycom_watchdog():
                 new_ds = xr.open_dataset(
                     DATA_URL,
                     engine="netcdf4",
-                    decode_times=False
+                    decode_times=False,
+                    chunks={}
                 ).sel(
                     lat=slice(30, 46),
                     lon=slice(129, 146)
@@ -180,10 +184,7 @@ def hycom_watchdog():
                     ds_local = new_ds
                     hycom_ready = True
 
-            # =================================================
             # 更新検知
-            # =================================================
-
             else:
 
                 old_time_size = ds_local.sizes.get(
@@ -201,7 +202,8 @@ def hycom_watchdog():
                     new_ds = xr.open_dataset(
                         DATA_URL,
                         engine="netcdf4",
-                        decode_times=False
+                        decode_times=False,
+                        chunks={}
                     ).sel(
                         lat=slice(30, 46),
                         lon=slice(129, 146)
@@ -259,43 +261,25 @@ def get_from_hycom(lat, lon):
     try:
 
         subset = ds_local.sel(
-            lat=slice(lat - 0.2, lat + 0.2),
-            lon=slice(lon - 0.2, lon + 0.2)
+            lat=lat,
+            lon=lon,
+            method="nearest"
         )
 
-        try:
-
-            subset = subset.isel(time=0)
-
-        except Exception as e:
-
-            return {
-                "status": "error",
-                "message": f"HYCOM time access error: {str(e)}"
-            }
+        subset = subset.isel(time=0)
 
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
 
-        u_array = subset["water_u"].values
-        v_array = subset["water_v"].values
+        u = float(subset["water_u"].values)
+        v = float(subset["water_v"].values)
 
-        valid = (
-            ~np.isnan(u_array)
-            & ~np.isnan(v_array)
-        )
-
-        if not np.any(valid):
+        if np.isnan(u) or np.isnan(v):
 
             return {
                 "status": "error",
                 "message": "land"
             }
-
-        idx = np.argwhere(valid)[0]
-
-        u = float(u_array[idx[0], idx[1]])
-        v = float(v_array[idx[0], idx[1]])
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
 
@@ -316,6 +300,72 @@ def get_from_hycom(lat, lon):
             "status": "error",
             "message": str(e)
         }
+
+# =========================================================
+# FORECAST BUILDER
+# =========================================================
+
+def build_forecast_response(lat, lon):
+
+    subset = ds_local.sel(
+        lat=lat,
+        lon=lon,
+        method="nearest"
+    )
+
+    results = []
+
+    max_time = subset.sizes["time"]
+
+    for h in range(min(48, max_time)):
+
+        try:
+
+            data = subset.isel(time=h)
+
+            if "depth" in data.dims:
+                data = data.isel(depth=0)
+
+            u = float(data["water_u"].values)
+            v = float(data["water_v"].values)
+
+            if np.isnan(u) or np.isnan(v):
+
+                results.append({
+                    "time": h,
+                    "speed": 0.0,
+                    "direction": 0.0
+                })
+
+                continue
+
+            speed = (
+                np.sqrt(u**2 + v**2)
+                * 1.94384
+            )
+
+            direction = (
+                np.degrees(np.arctan2(v, u)) + 360
+            ) % 360
+
+            results.append({
+                "time": h,
+                "speed": round(speed, 2),
+                "direction": round(direction, 1)
+            })
+
+        except Exception:
+
+            results.append({
+                "time": h,
+                "speed": 0.0,
+                "direction": 0.0
+            })
+
+    return {
+        "status": "success",
+        "data": results
+    }
 
 # =========================================================
 # WEATHER
@@ -511,42 +561,58 @@ def umishiru_forecast(
         # TTL切れなら裏更新
         if cache["expires"] <= now_jst:
 
-            def refresh():
+            with lock:
 
-                try:
+                already_refreshing = (
+                    areaCode in umishiru_refreshing
+                )
 
-                    new_data = fetch_48h_parallel(
-                        areaCode
-                    )
+                if not already_refreshing:
+                    umishiru_refreshing.add(areaCode)
 
-                    if new_data["status"] == "success":
+            if not already_refreshing:
 
-                        with lock:
+                def refresh():
 
-                            umishiru_cache[areaCode] = {
-                                "expires": (
-                                    now_jst
-                                    + timedelta(hours=6)
-                                ),
-                                "data": new_data
-                            }
+                    try:
+
+                        new_data = fetch_48h_parallel(
+                            areaCode
+                        )
+
+                        if new_data["status"] == "success":
+
+                            with lock:
+
+                                umishiru_cache[areaCode] = {
+                                    "expires": (
+                                        datetime.now(JST)
+                                        + timedelta(hours=6)
+                                    ),
+                                    "data": new_data
+                                }
+
+                            print(
+                                f"Umishiru refreshed: {areaCode}",
+                                flush=True
+                            )
+
+                    except Exception as e:
 
                         print(
-                            f"Umishiru refreshed: {areaCode}",
+                            f"Umishiru refresh error: {e}",
                             flush=True
                         )
 
-                except Exception as e:
+                    finally:
 
-                    print(
-                        f"Umishiru refresh error: {e}",
-                        flush=True
-                    )
+                        with lock:
+                            umishiru_refreshing.discard(areaCode)
 
-            threading.Thread(
-                target=refresh,
-                daemon=True
-            ).start()
+                threading.Thread(
+                    target=refresh,
+                    daemon=True
+                ).start()
 
         return cached_data
 
@@ -635,98 +701,26 @@ def forecast(
 
                 def refresh():
 
-                    global ds_local
-
                     try:
 
-                        subset = ds_local.sel(
-                            lat=slice(
-                                lat - 0.2,
-                                lat + 0.2
-                            ),
-                            lon=slice(
-                                lon - 0.2,
-                                lon + 0.2
-                            )
+                        new_response = build_forecast_response(
+                            lat,
+                            lon
                         )
 
-                        results = []
+                        if new_response["status"] == "success":
 
-                        max_time = subset.sizes["time"]
+                            with lock:
 
-                        for h in range(
-                            min(48, max_time)
-                        ):
+                                forecast_cache[key] = {
+                                    "time": datetime.utcnow().timestamp(),
+                                    "data": new_response
+                                }
 
-                            try:
-                                data = subset.isel(time=h)
-                            except Exception:
-                                continue
-
-                            if "depth" in data.dims:
-                                data = data.isel(depth=0)
-
-                            u_array = data["water_u"].values
-                            v_array = data["water_v"].values
-
-                            valid = (
-                                ~np.isnan(u_array)
-                                & ~np.isnan(v_array)
+                            print(
+                                f"Forecast refreshed: {key}",
+                                flush=True
                             )
-
-                            if not np.any(valid):
-
-                                results.append({
-                                    "time": h,
-                                    "speed": 0.0,
-                                    "direction": 0.0
-                                })
-
-                                continue
-
-                            idx = np.argwhere(valid)[0]
-
-                            u = float(
-                                u_array[idx[0], idx[1]]
-                            )
-
-                            v = float(
-                                v_array[idx[0], idx[1]]
-                            )
-
-                            speed = (
-                                np.sqrt(u**2 + v**2)
-                                * 1.94384
-                            )
-
-                            direction = (
-                                np.degrees(
-                                    np.arctan2(v, u)
-                                ) + 360
-                            ) % 360
-
-                            results.append({
-                                "time": h,
-                                "speed": round(speed, 2),
-                                "direction": round(direction, 1)
-                            })
-
-                        response = {
-                            "status": "success",
-                            "data": results
-                        }
-
-                        with lock:
-
-                            forecast_cache[key] = {
-                                "time": datetime.utcnow().timestamp(),
-                                "data": response
-                            }
-
-                        print(
-                            f"Forecast refreshed: {key}",
-                            flush=True
-                        )
 
                     except Exception as e:
 
@@ -753,67 +747,10 @@ def forecast(
 
     try:
 
-        subset = ds_local.sel(
-            lat=slice(lat - 0.2, lat + 0.2),
-            lon=slice(lon - 0.2, lon + 0.2)
+        response = build_forecast_response(
+            lat,
+            lon
         )
-
-        results = []
-
-        max_time = subset.sizes["time"]
-
-        for h in range(min(48, max_time)):
-
-            try:
-                data = subset.isel(time=h)
-            except Exception:
-                continue
-
-            if "depth" in data.dims:
-                data = data.isel(depth=0)
-
-            u_array = data["water_u"].values
-            v_array = data["water_v"].values
-
-            valid = (
-                ~np.isnan(u_array)
-                & ~np.isnan(v_array)
-            )
-
-            if not np.any(valid):
-
-                results.append({
-                    "time": h,
-                    "speed": 0.0,
-                    "direction": 0.0
-                })
-
-                continue
-
-            idx = np.argwhere(valid)[0]
-
-            u = float(u_array[idx[0], idx[1]])
-            v = float(v_array[idx[0], idx[1]])
-
-            speed = (
-                np.sqrt(u**2 + v**2)
-                * 1.94384
-            )
-
-            direction = (
-                np.degrees(np.arctan2(v, u)) + 360
-            ) % 360
-
-            results.append({
-                "time": h,
-                "speed": round(speed, 2),
-                "direction": round(direction, 1)
-            })
-
-        response = {
-            "status": "success",
-            "data": results
-        }
 
         with lock:
 
