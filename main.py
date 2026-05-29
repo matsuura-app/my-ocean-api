@@ -112,7 +112,7 @@ def load_hycom():
             DATA_URL,
             engine="netcdf4",
             decode_times=False,
-            chunks={}
+            
         ).sel(
             lat=slice(30, 46),
             lon=slice(129, 146)
@@ -173,7 +173,7 @@ def hycom_watchdog():
                     DATA_URL,
                     engine="netcdf4",
                     decode_times=False,
-                    chunks={}
+                   
                 ).sel(
                     lat=slice(30, 46),
                     lon=slice(129, 146)
@@ -225,9 +225,6 @@ def hycom_watchdog():
                             pass
 
         except Exception as e:
-
-            hycom_ready = False
-
             print(
                 f"HYCOM not reachable: {e}",
                 flush=True
