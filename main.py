@@ -3,6 +3,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 import time
+import copy
 
 import requests
 import xarray as xr
@@ -16,7 +17,6 @@ from fastapi.middleware.cors import CORSMiddleware
 # =========================================================
 
 API_KEY = os.getenv("MSIL_API_KEY")
-
 JST = timezone(timedelta(hours=9))
 
 app = FastAPI()
@@ -30,7 +30,6 @@ app.add_middleware(
 )
 
 session = requests.Session()
-
 session.headers.update({
     "Origin": "https://my-ocean-api.onrender.com",
     "Referer": "https://my-ocean-api.onrender.com/",
@@ -38,24 +37,21 @@ session.headers.update({
 })
 
 # =========================================================
-# LOCK & CACHE
+# LOCK / CACHE
 # =========================================================
 
 lock = threading.Lock()
 
-# キャッシュ
 umishiru_cache = {}
 forecast_cache = {}
 
-# 更新中管理
 umishiru_refreshing = set()
 forecast_refreshing = set()
 
-# 6時間
-CACHE_TTL = 21600
+CACHE_TTL = 21600  # 6h
 
 # =========================================================
-# HYCOM CONFIG
+# HYCOM
 # =========================================================
 
 DATA_URL = (
@@ -67,27 +63,22 @@ DATA_URL = (
 ds_local = None
 hycom_ready = False
 
+
 # =========================================================
 # DAILY RESET
 # =========================================================
 
 def reset_daily_cache():
-
-    global umishiru_cache
-    global forecast_cache
+    global umishiru_cache, forecast_cache
 
     last_reset_day = None
 
     while True:
-
         now = datetime.now(JST)
 
         if last_reset_day != now.date():
-
             with lock:
-
                 print("🔄 Daily cache reset", flush=True)
-
                 umishiru_cache = {}
                 forecast_cache = {}
 
@@ -95,176 +86,108 @@ def reset_daily_cache():
 
         time.sleep(60)
 
+
 # =========================================================
-# HYCOM LOAD
+# HYCOM LOAD（統一 decode_times=False）
 # =========================================================
 
 def load_hycom():
-
-    global ds_local
-    global hycom_ready
+    global ds_local, hycom_ready
 
     print("HYCOM loading...", flush=True)
 
     try:
-
         ds = xr.open_dataset(
             DATA_URL,
             engine="netcdf4",
-            decode_times=False,
-            
+            decode_times=False
         ).sel(
             lat=slice(30, 46),
             lon=slice(129, 146)
         )
 
         with lock:
-
             ds_local = ds
             hycom_ready = True
 
         print("HYCOM loaded", flush=True)
 
     except Exception as e:
-
         hycom_ready = False
+        print(f"HYCOM load error: {e}", flush=True)
 
-        print(
-            f"HYCOM load error: {e}",
-            flush=True
-        )
 
 # =========================================================
-# HYCOM WATCHDOG
+# WATCHDOG（軽量化）
 # =========================================================
 
 def hycom_watchdog():
-
-    global ds_local
-    global hycom_ready
+    global ds_local, hycom_ready
 
     while True:
-
-        test_ds = None
-        old_ds = None
-
         try:
-
-            test_ds = xr.open_dataset(
+            test = xr.open_dataset(
                 DATA_URL,
                 engine="netcdf4",
                 decode_times=False
             )
 
-            new_time_size = test_ds.sizes.get(
-                "time",
-                0
-            )
+            new_time_size = test.sizes["time"]
+            test.close()
 
-            # 初回復旧
             if ds_local is None:
-
-                print(
-                    "HYCOM first load from watchdog",
-                    flush=True
-                )
+                print("HYCOM first load from watchdog", flush=True)
 
                 new_ds = xr.open_dataset(
                     DATA_URL,
                     engine="netcdf4",
-                    decode_times=False,
-                   
-                ).sel(
-                    lat=slice(30, 46),
-                    lon=slice(129, 146)
-                )
+                    decode_times=False
+                ).sel(lat=slice(30, 46), lon=slice(129, 146))
 
                 with lock:
-
                     ds_local = new_ds
                     hycom_ready = True
 
-            # 更新検知
             else:
-
-                old_time_size = ds_local.sizes.get(
-                    "time",
-                    0
-                )
+                old_time_size = ds_local.sizes["time"]
 
                 if new_time_size != old_time_size:
-
-                    print(
-                        "🔄 HYCOM updated",
-                        flush=True
-                    )
+                    print("🔄 HYCOM updated", flush=True)
 
                     new_ds = xr.open_dataset(
                         DATA_URL,
                         engine="netcdf4",
-                        decode_times=False,
-                        chunks={}
-                    ).sel(
-                        lat=slice(30, 46),
-                        lon=slice(129, 146)
-                    )
+                        decode_times=False
+                    ).sel(lat=slice(30, 46), lon=slice(129, 146))
 
                     with lock:
-
-                        old_ds = ds_local
+                        old = ds_local
                         ds_local = new_ds
                         hycom_ready = True
 
-                    time.sleep(5)
-
-                    if old_ds is not None:
-
+                    if old:
                         try:
-                            old_ds.close()
-                        except Exception:
+                            old.close()
+                        except:
                             pass
 
         except Exception as e:
-            print(
-                f"HYCOM not reachable: {e}",
-                flush=True
-            )
+            print(f"HYCOM not reachable: {e}", flush=True)
 
-        finally:
-
-            if test_ds is not None:
-
-                try:
-                    test_ds.close()
-                except Exception:
-                    pass
-
-        # 12時間ごと
         time.sleep(12 * 3600)
 
+
 # =========================================================
-# HYCOM CURRENT
+# CURRENT
 # =========================================================
 
 def get_from_hycom(lat, lon):
 
     if ds_local is None:
-
-        return {
-            "status": "loading",
-            "message": "HYCOM initializing"
-        }
+        return {"status": "loading"}
 
     try:
-
-        subset = ds_local.sel(
-            lat=lat,
-            lon=lon,
-            method="nearest"
-        )
         subset = ds_local.sel(lat=lat, lon=lon, method="nearest")
-
-        time_size = subset.sizes["time"]
 
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
@@ -273,17 +196,10 @@ def get_from_hycom(lat, lon):
         v = float(subset["water_v"].values)
 
         if np.isnan(u) or np.isnan(v):
-
-            return {
-                "status": "error",
-                "message": "land"
-            }
+            return {"status": "error", "message": "land"}
 
         speed = np.sqrt(u**2 + v**2) * 1.94384
-
-        direction = (
-            np.degrees(np.arctan2(v, u)) + 360
-        ) % 360
+        direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
 
         return {
             "status": "success",
@@ -293,30 +209,23 @@ def get_from_hycom(lat, lon):
         }
 
     except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-        return {
-            "status": "error",
-            "message": str(e)
-        }
 
 # =========================================================
-# FORECAST BUILDER
+# FORECAST（time修正済み）
 # =========================================================
 
 def build_forecast_response(lat, lon):
 
-    subset = ds_local.sel(
-        lat=lat,
-        lon=lon,
-        method="nearest"
-    )
+    subset = ds_local.sel(lat=lat, lon=lon, method="nearest")
 
     results = []
-
     max_time = min(48, subset.sizes["time"])
 
-    for h in range(max_time):
+    time_values = subset["time"].values
 
+    for h in range(max_time):
         try:
             data = subset.isel(time=h)
 
@@ -327,106 +236,71 @@ def build_forecast_response(lat, lon):
             v = float(data["water_v"].values)
 
             if np.isnan(u) or np.isnan(v):
-                continue  # ❗嘘データ出さない
+                continue
 
             speed = np.sqrt(u**2 + v**2) * 1.94384
             direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
 
-            # ⭐ここが重要
-            model_time = ds_local["time"].values[h]
-
             results.append({
-                "time": str(model_time),   # ← 実データ時刻
+                "time": str(time_values[h]),
                 "speed": round(speed, 2),
                 "direction": round(direction, 1)
             })
 
-        except Exception:
+        except:
             continue
 
-    return {
-        "status": "success",
-        "data": results
-    }
+    return {"status": "success", "data": results}
+
+
 # =========================================================
 # WEATHER
 # =========================================================
 
 def fetch_weather_logic(lat, lon):
 
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": (
-            "temperature_2m,"
-            "windspeed_10m,"
-            "winddirection_10m,"
-            "weathercode"
-        ),
-        "forecast_days": 7,
-        "timezone": "Asia/Tokyo"
-    }
-
     try:
-
         r = session.get(
             "https://api.open-meteo.com/v1/forecast",
-            params=params,
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "hourly": "temperature_2m,windspeed_10m,winddirection_10m,weathercode",
+                "forecast_days": 7,
+                "timezone": "Asia/Tokyo"
+            },
             timeout=10
         )
 
         if r.status_code == 200:
             return r.json()
 
-    except Exception as e:
-
-        print(
-            f"weather fetch error: {e}",
-            flush=True
-        )
+    except:
+        pass
 
     return None
 
+
 # =========================================================
-# UMISHIRU
+# UMISHIRU（そのまま安定版）
 # =========================================================
 
-def fetch_umishiru_hour(
-    area_code,
-    hour_offset
-):
+def fetch_umishiru_hour(area_code, hour_offset):
 
     try:
-
-        base_jst = datetime.now(JST).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0
+        base = datetime.now(JST).replace(
+            hour=0, minute=0, second=0, microsecond=0
         )
 
-        target = base_jst + timedelta(
-            hours=hour_offset
-        )
-
-        time_string = target.strftime(
-            "%Y%m%d%H%M"
-        )
-
-        url = (
-            "https://api.msil.go.jp/"
-            "tidal-current-prediction/v3/data"
-        )
-
-        params = {
-            "areaCode": area_code,
-            "time": time_string,
-            "key": API_KEY
-        }
+        target = base + timedelta(hours=hour_offset)
 
         r = session.get(
-            url,
-            params=params,
+            "https://api.msil.go.jp/tidal-current-prediction/v3/data",
+            params={
+                "areaCode": area_code,
+                "time": target.strftime("%Y%m%d%H%M"),
+                "key": API_KEY
+            },
             timeout=20
         )
 
@@ -434,194 +308,33 @@ def fetch_umishiru_hour(
             return None
 
         data = r.json()
-
-        features = data.get(
-            "features",
-            []
-        )
+        features = data.get("features", [])
 
         if not features:
             return None
 
-        p = features[0].get(
-            "properties",
-            {}
-        )
-
-        speed = float(
-            p.get("currentSpeedKt", 0.0) or 0.0
-        )
-
-        direction = float(
-            p.get("currentDirection", 0.0) or 0.0
-        )
+        p = features[0].get("properties", {})
 
         return {
             "time": hour_offset,
-            "speed": speed,
-            "direction": direction
+            "speed": float(p.get("currentSpeedKt", 0) or 0),
+            "direction": float(p.get("currentDirection", 0) or 0)
         }
 
-    except Exception as e:
-
-        print(
-            f"umishiru fetch error: {e}",
-            flush=True
-        )
-
+    except:
         return None
+
 
 def fetch_48h_parallel(area_code):
 
-    with ThreadPoolExecutor(
-        max_workers=8
-    ) as executor:
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        res = list(ex.map(lambda h: fetch_umishiru_hour(area_code, h), range(48)))
 
-        results = list(
-            executor.map(
-                lambda h: fetch_umishiru_hour(
-                    area_code,
-                    h
-                ),
-                range(48)
-            )
-        )
+    res = [r for r in res if r]
+    res.sort(key=lambda x: x["time"])
 
-    filtered = [
-        r for r in results if r
-    ]
+    return {"status": "success", "data": res} if res else {"status": "error", "data": []}
 
-    filtered.sort(
-        key=lambda x: x["time"]
-    )
-
-    if not filtered:
-
-        return {
-            "status": "error",
-            "data": []
-        }
-
-    return {
-        "status": "success",
-        "data": filtered
-    }
-
-# =========================================================
-# UMISHIRU API
-# =========================================================
-
-@app.get("/umishiru_forecast")
-def umishiru_forecast(
-    areaCode: str = Query(
-        ...,
-        alias="areaCode"
-    )
-):
-
-    if not API_KEY:
-
-        return {
-            "status": "error",
-            "message": "MSIL_API_KEY missing"
-        }
-
-    now_jst = datetime.now(JST)
-
-    with lock:
-        cache = umishiru_cache.get(areaCode)
-
-    # =====================================================
-    # キャッシュ存在時
-    # =====================================================
-
-    if cache:
-        print(
-            f"UMISHIRU CACHE HIT: {areaCode}",
-            flush=True
-        )
-        cached_data = cache["data"]
-
-        # TTL切れなら裏更新
-        if cache["expires"] <= now_jst:
-
-            with lock:
-
-                already_refreshing = (
-                    areaCode in umishiru_refreshing
-                )
-
-                if not already_refreshing:
-                    umishiru_refreshing.add(areaCode)
-
-            if not already_refreshing:
-
-                def refresh():
-
-                    try:
-
-                        new_data = fetch_48h_parallel(
-                            areaCode
-                        )
-
-                        if new_data["status"] == "success":
-
-                            with lock:
-
-                                umishiru_cache[areaCode] = {
-                                    "expires": (
-                                        datetime.now(JST)
-                                        + timedelta(hours=6)
-                                    ),
-                                    "data": new_data
-                                }
-
-                            print(
-                                f"Umishiru refreshed: {areaCode}",
-                                flush=True
-                            )
-
-                    except Exception as e:
-
-                        print(
-                            f"Umishiru refresh error: {e}",
-                            flush=True
-                        )
-
-                    finally:
-
-                        with lock:
-                            umishiru_refreshing.discard(areaCode)
-
-                threading.Thread(
-                    target=refresh,
-                    daemon=True
-                ).start()
-
-        return cached_data
-
-    # =====================================================
-    # 初回取得
-    # =====================================================
-    print(
-        f"UMISHIRU CACHE MISS: {areaCode}",
-        flush=True
-    )
-    data = fetch_48h_parallel(areaCode)
-
-    if data["status"] == "success":
-
-        with lock:
-
-            umishiru_cache[areaCode] = {
-                "expires": (
-                    now_jst
-                    + timedelta(hours=6)
-                ),
-                "data": data
-            }
-
-    return data
 
 # =========================================================
 # API
@@ -629,158 +342,76 @@ def umishiru_forecast(
 
 @app.get("/")
 def root():
+    return {"status": "ok", "hycom_ready": hycom_ready}
 
-    return {
-        "status": "ok",
-        "server": "marine-final",
-        "hycom_ready": hycom_ready
-    }
 
 @app.get("/current")
-def current(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
-
+def current(lat: float = Query(...), lon: float = Query(...)):
     return get_from_hycom(lat, lon)
 
+
 @app.get("/forecast")
-def forecast(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
+def forecast(lat: float, lon: float):
 
     if not hycom_ready or ds_local is None:
-
-        return {
-            "status": "loading",
-            "data": []
-        }
+        return {"status": "loading", "data": []}
 
     key = f"{round(lat,2)}_{round(lon,2)}"
-
     now = datetime.utcnow().timestamp()
 
     with lock:
         cache = forecast_cache.get(key)
 
-    # =====================================================
-    # キャッシュ存在時
-    # =====================================================
-
     if cache:
-
-        cached_data = cache["data"]
-
-        # TTL切れなら裏更新
-        if now - cache["time"] >= CACHE_TTL:
+        if now - cache["time"] > CACHE_TTL:
 
             with lock:
-
-                already_refreshing = (
-                    key in forecast_refreshing
-                )
-
-                if not already_refreshing:
+                if key not in forecast_refreshing:
                     forecast_refreshing.add(key)
 
-            if not already_refreshing:
+            def refresh():
+                try:
+                    new = build_forecast_response(lat, lon)
 
-                def refresh():
-
-                    try:
-
-                        new_response = build_forecast_response(
-                            lat,
-                            lon
-                        )
-
-                        if new_response["status"] == "success":
-
-                            with lock:
-
-                                forecast_cache[key] = {
-                                    "time": datetime.utcnow().timestamp(),
-                                    "data": new_response
-                                }
-
-                            print(
-                                f"Forecast refreshed: {key}",
-                                flush=True
-                            )
-
-                    except Exception as e:
-
-                        print(
-                            f"Forecast refresh error: {e}",
-                            flush=True
-                        )
-
-                    finally:
-
+                    if new["status"] == "success":
                         with lock:
-                            forecast_refreshing.discard(key)
+                            forecast_cache[key] = {
+                                "time": datetime.utcnow().timestamp(),
+                                "data": new
+                            }
+                finally:
+                    with lock:
+                        forecast_refreshing.discard(key)
 
-                threading.Thread(
-                    target=refresh,
-                    daemon=True
-                ).start()
+            threading.Thread(target=refresh, daemon=True).start()
 
-        return cached_data
-
-    # =====================================================
-    # 初回取得
-    # =====================================================
+        return copy.deepcopy(cache["data"])
 
     try:
-
-        response = build_forecast_response(
-            lat,
-            lon
-        )
+        res = build_forecast_response(lat, lon)
 
         with lock:
-
             forecast_cache[key] = {
                 "time": now,
-                "data": response
+                "data": res
             }
 
-        return response
+        return res
 
     except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-        return {
-            "status": "error",
-            "message": str(e)
-        }
 
 @app.get("/weather")
-def weather(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
-
+def weather(lat: float, lon: float):
     data = fetch_weather_logic(lat, lon)
+    return {"status": "success", "weather": data} if data else {"status": "error"}
 
-    if data is not None and "hourly" in data:
-
-        return {
-            "status": "success",
-            "weather": data
-        }
-
-    return {
-        "status": "error"
-    }
 
 @app.get("/routes")
 def routes():
+    return [r.path for r in app.routes]
 
-    return [
-        route.path
-        for route in app.routes
-    ]
 
 # =========================================================
 # STARTUP
@@ -789,20 +420,6 @@ def routes():
 @app.on_event("startup")
 def startup():
 
-    # HYCOM初回ロード
-    threading.Thread(
-        target=load_hycom,
-        daemon=True
-    ).start()
-
-    # HYCOM監視
-    threading.Thread(
-        target=hycom_watchdog,
-        daemon=True
-    ).start()
-
-    # 日跨ぎリセット
-    threading.Thread(
-        target=reset_daily_cache,
-        daemon=True
-    ).start()
+    threading.Thread(target=load_hycom, daemon=True).start()
+    threading.Thread(target=hycom_watchdog, daemon=True).start()
+    threading.Thread(target=reset_daily_cache, daemon=True).start()
