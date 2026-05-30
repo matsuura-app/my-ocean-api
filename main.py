@@ -242,11 +242,12 @@ def build_forecast_response(lat, lon):
             direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
 
             results.append({
-                "time": str(time_values[h]),
+                "hour": h,
+                "time_index": h,
+                "model_time": str(time_values[h]),
                 "speed": round(speed, 2),
                 "direction": round(direction, 1)
             })
-
         except:
             continue
 
