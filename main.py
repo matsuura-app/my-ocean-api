@@ -345,7 +345,21 @@ def fetch_48h_parallel(area_code):
 def root():
     return {"status": "ok", "hycom_ready": hycom_ready}
 
+@app.get("/umishiru_forecast")
+def umishiru_forecast(
+    areaCode: str = Query(..., alias="areaCode")
+):
 
+    if not API_KEY:
+        return {"status": "error", "message": "MSIL_API_KEY missing"}
+
+    data = fetch_48h_parallel(areaCode)
+
+    return {
+    "status": "success",
+    "data": data["data"]
+}
+    
 @app.get("/current")
 def current(lat: float = Query(...), lon: float = Query(...)):
     return get_from_hycom(lat, lon)
