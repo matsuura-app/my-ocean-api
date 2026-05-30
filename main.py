@@ -443,7 +443,7 @@ def fetch_umishiru_hour(
         r = session.get(
             url,
             params=params,
-            timeout=10
+            timeout=20
         )
 
         if r.status_code != 200:
@@ -552,7 +552,10 @@ def umishiru_forecast(
     # =====================================================
 
     if cache:
-
+        print(
+            f"UMISHIRU CACHE HIT: {areaCode}",
+            flush=True
+        )
         cached_data = cache["data"]
 
         # TTL切れなら裏更新
@@ -616,7 +619,10 @@ def umishiru_forecast(
     # =====================================================
     # 初回取得
     # =====================================================
-
+    print(
+        f"UMISHIRU CACHE MISS: {areaCode}",
+        flush=True
+    )
     data = fetch_48h_parallel(areaCode)
 
     if data["status"] == "success":
