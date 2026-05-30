@@ -262,8 +262,9 @@ def get_from_hycom(lat, lon):
             lon=lon,
             method="nearest"
         )
+        subset = ds_local.sel(lat=lat, lon=lon, method="nearest")
 
-        subset = subset.isel(time=0)
+        time_size = subset.sizes["time"]
 
         if "depth" in subset.dims:
             subset = subset.isel(depth=0)
@@ -312,12 +313,11 @@ def build_forecast_response(lat, lon):
 
     results = []
 
-    max_time = subset.sizes["time"]
+    max_time = min(48, subset.sizes["time"])
 
-    for h in range(min(48, max_time)):
+    for h in range(max_time):
 
         try:
-
             data = subset.isel(time=h)
 
             if "depth" in data.dims:
@@ -327,43 +327,27 @@ def build_forecast_response(lat, lon):
             v = float(data["water_v"].values)
 
             if np.isnan(u) or np.isnan(v):
+                continue  # ❗嘘データ出さない
 
-                results.append({
-                    "time": h,
-                    "speed": 0.0,
-                    "direction": 0.0
-                })
+            speed = np.sqrt(u**2 + v**2) * 1.94384
+            direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
 
-                continue
-
-            speed = (
-                np.sqrt(u**2 + v**2)
-                * 1.94384
-            )
-
-            direction = (
-                np.degrees(np.arctan2(v, u)) + 360
-            ) % 360
+            # ⭐ここが重要
+            model_time = ds_local["time"].values[h]
 
             results.append({
-                "time": h,
+                "time": str(model_time),   # ← 実データ時刻
                 "speed": round(speed, 2),
                 "direction": round(direction, 1)
             })
 
         except Exception:
-
-            results.append({
-                "time": h,
-                "speed": 0.0,
-                "direction": 0.0
-            })
+            continue
 
     return {
         "status": "success",
         "data": results
     }
-
 # =========================================================
 # WEATHER
 # =========================================================
