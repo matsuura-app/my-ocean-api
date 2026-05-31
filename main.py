@@ -99,9 +99,12 @@ def reset_daily_cache():
 # HYCOM LOAD
 # =========================================================
 def load_hycom():
-    global ds_local
-    global hycom_ready
+    global ds_local, hycom_ready
+
+    hycom_ready = False   # ★これ必須
+
     print("HYCOM loading...", flush=True)
+
     try:
         ds = xr.open_dataset(
             DATA_URL,
@@ -111,16 +114,16 @@ def load_hycom():
             lat=slice(30, 46),
             lon=slice(129, 146)
         )
+
         with lock:
             ds_local = ds
             hycom_ready = True
+
         print("HYCOM loaded", flush=True)
+
     except Exception as e:
         hycom_ready = False
-        print(
-            f"HYCOM load error: {e}",
-            flush=True
-        )
+        print(f"HYCOM load error: {e}", flush=True)
 # =========================================================
 # HYCOM WATCHDOG
 # =========================================================
@@ -708,26 +711,22 @@ def startup():
 
     print("🚀 Startup begin", flush=True)
 
-    # ★ ここはスレッドじゃなくて同期でやる
+    hycom_ready = False
+
     for i in range(3):
-        try:
-            load_hycom()
-            if hycom_ready:
-                break
-        except Exception as e:
-            print(f"HYCOM load retry {i+1}: {e}", flush=True)
-            time.sleep(5)
+        load_hycom()
 
-    # watchdogだけ別スレッド（これはOK）
-    threading.Thread(
-        target=hycom_watchdog,
-        daemon=True
-    ).start()
+        if hycom_ready:
+            print("✅ HYCOM ready", flush=True)
+            break
 
-    # cache resetもOK
-    threading.Thread(
-        target=reset_daily_cache,
-        daemon=True
-    ).start()
+        print(f"⚠️ retry HYCOM load {i+1}", flush=True)
+        time.sleep(5)
+
+    if not hycom_ready:
+        print("❌ HYCOM failed after retries", flush=True)
+
+    threading.Thread(target=hycom_watchdog, daemon=True).start()
+    threading.Thread(target=reset_daily_cache, daemon=True).start()
 
     print("✅ Startup complete", flush=True)
