@@ -98,58 +98,39 @@ def reset_daily_cache():
 # =========================================================
 # HYCOM LOAD
 # =========================================================
-
 def load_hycom():
-
     global ds_local
     global hycom_ready
-
     print("HYCOM loading...", flush=True)
-
     try:
-
         ds = xr.open_dataset(
             DATA_URL,
             engine="netcdf4",
             decode_times=False,
-            
         ).sel(
             lat=slice(30, 46),
             lon=slice(129, 146)
         )
-
         with lock:
-
             ds_local = ds
             hycom_ready = True
-
         print("HYCOM loaded", flush=True)
-
     except Exception as e:
-
         hycom_ready = False
-
         print(
             f"HYCOM load error: {e}",
             flush=True
         )
-
 # =========================================================
 # HYCOM WATCHDOG
 # =========================================================
-
 def hycom_watchdog():
-
     global ds_local
     global hycom_ready
-
     while True:
-
         test_ds = None
         old_ds = None
-
         try:
-
             test_ds = xr.open_dataset(
                 DATA_URL,
                 engine="netcdf4",
@@ -160,45 +141,34 @@ def hycom_watchdog():
                 "time",
                 0
             )
-
             # 初回復旧
             if ds_local is None:
-
                 print(
                     "HYCOM first load from watchdog",
                     flush=True
                 )
-
                 new_ds = xr.open_dataset(
                     DATA_URL,
                     engine="netcdf4",
                     decode_times=False,
-                   
                 ).sel(
                     lat=slice(30, 46),
                     lon=slice(129, 146)
                 )
-
                 with lock:
-
                     ds_local = new_ds
                     hycom_ready = True
-
             # 更新検知
             else:
-
                 old_time_size = ds_local.sizes.get(
                     "time",
                     0
                 )
-
                 if new_time_size != old_time_size:
-
                     print(
                         "🔄 HYCOM updated",
                         flush=True
                     )
-
                     new_ds = xr.open_dataset(
                         DATA_URL,
                         engine="netcdf4",
@@ -208,17 +178,12 @@ def hycom_watchdog():
                         lat=slice(30, 46),
                         lon=slice(129, 146)
                     )
-
                     with lock:
-
                         old_ds = ds_local
                         ds_local = new_ds
                         hycom_ready = True
-
                     time.sleep(5)
-
                     if old_ds is not None:
-
                         try:
                             old_ds.close()
                         except Exception:
@@ -790,24 +755,34 @@ def routes():
 # =========================================================
 # STARTUP
 # =========================================================
-
 @app.on_event("startup")
 def startup():
-
-    # HYCOM初回ロード
-    threading.Thread(
-        target=load_hycom,
-        daemon=True
-    ).start()
-
-    # HYCOM監視
+    print("🚀 Startup begin", flush=True)
+    # =====================================================
+    # HYCOM初回ロード（リトライ付き・同期）
+    # =====================================================
+    for i in range(3):
+        try:
+            print(f"HYCOM load attempt {i+1}", flush=True)
+            load_hycom()
+            # 成功判定（重要）
+            if hycom_ready and ds_local is not None:
+                print("✅ HYCOM load success", flush=True)
+                break
+            else:
+                raise Exception("HYCOM not ready after load")
+        except Exception as e:
+            print(f"⚠️ HYCOM load failed {i+1}: {e}", flush=True)
+            time.sleep(5)
+    # =====================================================
+    # バックグラウンド処理（ここから並列）
+    # =====================================================
     threading.Thread(
         target=hycom_watchdog,
         daemon=True
     ).start()
-
-    # 日跨ぎリセット
     threading.Thread(
         target=reset_daily_cache,
         daemon=True
     ).start()
+    print("✅ Startup complete", flush=True)
