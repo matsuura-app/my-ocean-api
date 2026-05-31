@@ -611,7 +611,6 @@ def current(
     lat: float = Query(...),
     lon: float = Query(...)
 ):
-
     return get_from_hycom(lat, lon)
 
 @app.get("/forecast")
@@ -619,110 +618,58 @@ def forecast(
     lat: float = Query(...),
     lon: float = Query(...)
 ):
-
     if not hycom_ready or ds_local is None:
-
         return {
             "status": "loading",
             "data": []
         }
-
     key = f"{round(lat,2)}_{round(lon,2)}"
-
     now = datetime.utcnow().timestamp()
-
     with lock:
         cache = forecast_cache.get(key)
-
-    # =====================================================
-    # キャッシュ存在時
-    # =====================================================
-
+    # =========================
+    # CACHE HIT
+    # =========================
     if cache:
+        if now - cache["time"] < CACHE_TTL:
+            return {
+                "status": "success",
+                "data": cache["data"]
+            }
+        # expired → background refresh
+        def refresh():
+            try:
+                new_response = build_forecast_response(lat, lon)
 
-        cached_data = cache["data"]
-
-        # TTL切れなら裏更新
-        if now - cache["time"] >= CACHE_TTL:
-
-            with lock:
-
-                already_refreshing = (
-                    key in forecast_refreshing
-                )
-
-                if not already_refreshing:
-                    forecast_refreshing.add(key)
-
-            if not already_refreshing:
-
-                def refresh():
-
-                    try:
-
-                        new_response = build_forecast_response(
-                            lat,
-                            lon
-                        )
-
-                        if new_response["status"] == "success":
-
-                            with lock:
-
-                                forecast_cache[key] = {
-                                    "time": datetime.utcnow().timestamp(),
-                                    "data": new_response
-                                }
-
-                            print(
-                                f"Forecast refreshed: {key}",
-                                flush=True
-                            )
-
-                    except Exception as e:
-
-                        print(
-                            f"Forecast refresh error: {e}",
-                            flush=True
-                        )
-
-                    finally:
-
-                        with lock:
-                            forecast_refreshing.discard(key)
-
-                threading.Thread(
-                    target=refresh,
-                    daemon=True
-                ).start()
-
-        return cached_data
-
-    # =====================================================
-    # 初回取得
-    # =====================================================
-
+                if new_response["status"] == "success":
+                    with lock:
+                        forecast_cache[key] = {
+                            "time": datetime.utcnow().timestamp(),
+                            "data": new_response["data"]  # ★重要
+                        }
+            except Exception as e:
+                print("Forecast refresh error:", e, flush=True)
+        threading.Thread(target=refresh, daemon=True).start()
+        return {
+            "status": "success",
+            "data": cache["data"]
+        }
+    # =========================
+    # FIRST FETCH
+    # =========================
     try:
-
-        response = build_forecast_response(
-            lat,
-            lon
-        )
-
+        response = build_forecast_response(lat, lon)
         with lock:
-
             forecast_cache[key] = {
                 "time": now,
-                "data": response
+                "data": response["data"]  # ★ここも重要
             }
-
         return response
-
     except Exception as e:
-
         return {
             "status": "error",
-            "message": str(e)
+            "message": str(e),
+            "data": []
         }
 
 @app.get("/weather")
@@ -757,32 +704,30 @@ def routes():
 # =========================================================
 @app.on_event("startup")
 def startup():
+    global hycom_ready
+
     print("🚀 Startup begin", flush=True)
-    # =====================================================
-    # HYCOM初回ロード（リトライ付き・同期）
-    # =====================================================
+
+    # ★ ここはスレッドじゃなくて同期でやる
     for i in range(3):
         try:
-            print(f"HYCOM load attempt {i+1}", flush=True)
             load_hycom()
-            # 成功判定（重要）
-            if hycom_ready and ds_local is not None:
-                print("✅ HYCOM load success", flush=True)
+            if hycom_ready:
                 break
-            else:
-                raise Exception("HYCOM not ready after load")
         except Exception as e:
-            print(f"⚠️ HYCOM load failed {i+1}: {e}", flush=True)
+            print(f"HYCOM load retry {i+1}: {e}", flush=True)
             time.sleep(5)
-    # =====================================================
-    # バックグラウンド処理（ここから並列）
-    # =====================================================
+
+    # watchdogだけ別スレッド（これはOK）
     threading.Thread(
         target=hycom_watchdog,
         daemon=True
     ).start()
+
+    # cache resetもOK
     threading.Thread(
         target=reset_daily_cache,
         daemon=True
     ).start()
+
     print("✅ Startup complete", flush=True)
