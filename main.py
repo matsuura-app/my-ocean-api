@@ -312,14 +312,10 @@ def build_forecast_response(lat, lon):
 
     print(time_values[:20], flush=True)
     results = []
-
-    time_values = subset["time"].values
-
+    
     # =========================
     # ★ 現在時刻インデックス
     # =========================
-    now_index = 0  # HYCOMは通常0が最新付近 or 最新固定モデル
-
     max_time = min(48, subset.sizes["time"])
     base_time = datetime.utcnow()
     
@@ -339,10 +335,12 @@ def build_forecast_response(lat, lon):
             speed = np.sqrt(u**2 + v**2) * 1.94384
             direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
 
+            hour_offset = float(time_values[h])
+
             results.append({
-                "hour_offset": h,
+                "hour_offset": hour_offset,
                 "estimated_time": (
-                    base_time + timedelta(hours=h)
+                    base_time + timedelta(hours=hour_offset)
                 ).isoformat(),
                 "speed": round(speed, 2),
                 "direction": round(direction, 1)
