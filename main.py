@@ -308,7 +308,9 @@ def build_forecast_response(lat, lon):
         lon=lon,
         method="nearest"
     )
+    time_values = subset["time"].values
 
+    print(time_values[:20], flush=True)
     results = []
 
     time_values = subset["time"].values
