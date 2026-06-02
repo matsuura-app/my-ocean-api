@@ -600,7 +600,7 @@ def umishiru_forecast(
 # API
 # =========================================================
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
 
     return {
@@ -608,6 +608,7 @@ def root():
         "server": "marine-final",
         "hycom_ready": hycom_ready
     }
+
 
 @app.get("/current")
 def current(
