@@ -51,9 +51,9 @@ forecast_cache = {}
 umishiru_refreshing = set()
 forecast_refreshing = set()
 
-# 6時間
-CACHE_TTL = 21600
-
+# キャッシュ時間
+UMISHIRU_CACHE_TTL = 43200  # 12時間
+HYCOM_CACHE_TTL = 43200     # 12時間
 # =========================================================
 # HYCOM CONFIG
 # =========================================================
@@ -66,34 +66,6 @@ DATA_URL = (
 
 ds_local = None
 hycom_ready = False
-
-# =========================================================
-# DAILY RESET
-# =========================================================
-
-def reset_daily_cache():
-
-    global umishiru_cache
-    global forecast_cache
-
-    last_reset_day = None
-
-    while True:
-
-        now = datetime.now(JST)
-
-        if last_reset_day != now.date():
-
-            with lock:
-
-                print("🔄 Daily cache reset", flush=True)
-
-                umishiru_cache = {}
-                forecast_cache = {}
-
-            last_reset_day = now.date()
-
-        time.sleep(60)
 
 # =========================================================
 # HYCOM LOAD
@@ -477,9 +449,9 @@ def fetch_48h_parallel(area_code):
 
     return {
         "status": "success",
+        "generated_at": datetime.now(JST).isoformat(),
         "data": filtered
     }
-
 # =========================================================
 # UMISHIRU API
 # =========================================================
@@ -544,7 +516,7 @@ def umishiru_forecast(
                                 umishiru_cache[areaCode] = {
                                     "expires": (
                                         datetime.now(JST)
-                                        + timedelta(hours=6)
+                                        + timedelta(hours=12)
                                     ),
                                     "data": new_data
                                 }
@@ -589,7 +561,7 @@ def umishiru_forecast(
             umishiru_cache[areaCode] = {
                 "expires": (
                     now_jst
-                    + timedelta(hours=6)
+                    + timedelta(hours=12)
                 ),
                 "data": data
             }
@@ -600,7 +572,7 @@ def umishiru_forecast(
 # API
 # =========================================================
 
-@app.api_route("/", methods=["GET", "HEAD"])
+@app.get("/")
 def root():
 
     return {
@@ -635,7 +607,7 @@ def forecast(
     # CACHE HIT
     # =========================
     if cache:
-        if now - cache["time"] < CACHE_TTL:
+        if now - cache["time"] < HYCOM_CACHE_TTL:
             return {
                 "status": "success",
                 "data": cache["data"]
@@ -728,6 +700,5 @@ def startup():
         print("❌ HYCOM failed after retries", flush=True)
 
     threading.Thread(target=hycom_watchdog, daemon=True).start()
-    threading.Thread(target=reset_daily_cache, daemon=True).start()
 
     print("✅ Startup complete", flush=True)
