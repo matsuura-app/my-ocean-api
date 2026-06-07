@@ -51,9 +51,9 @@ forecast_cache = {}
 umishiru_refreshing = set()
 forecast_refreshing = set()
 
-# キャッシュ時間
 UMISHIRU_CACHE_TTL = 43200  # 12時間
-HYCOM_CACHE_TTL = 43200     # 12時間
+HYCOM_CACHE_TTL = 72 * 3600      # 72時間保持
+HYCOM_REFRESH_TTL = 24 * 3600    # 24時間で裏更新
 # =========================================================
 # HYCOM CONFIG
 # =========================================================
@@ -293,44 +293,6 @@ def build_forecast_response(lat, lon):
         "status": "success",
         "data": results
     }
-# =========================================================
-# WEATHER
-# =========================================================
-
-def fetch_weather_logic(lat, lon):
-
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": (
-            "temperature_2m,"
-            "windspeed_10m,"
-            "winddirection_10m,"
-            "weathercode"
-        ),
-        "forecast_days": 7,
-        "timezone": "Asia/Tokyo"
-    }
-
-    try:
-
-        r = session.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params=params,
-            timeout=10
-        )
-
-        if r.status_code == 200:
-            return r.json()
-
-    except Exception as e:
-
-        print(
-            f"weather fetch error: {e}",
-            flush=True
-        )
-
-    return None
 
 # =========================================================
 # UMISHIRU
@@ -607,25 +569,78 @@ def forecast(
     # CACHE HIT
     # =========================
     if cache:
-        if now - cache["time"] < HYCOM_CACHE_TTL:
-            return {
-                "status": "success",
-                "data": cache["data"]
-            }
-        # expired → background refresh
-        def refresh():
-            try:
-                new_response = build_forecast_response(lat, lon)
 
-                if new_response["status"] == "success":
-                    with lock:
-                        forecast_cache[key] = {
-                            "time": datetime.utcnow().timestamp(),
-                            "data": new_response["data"]  # ★重要
-                        }
-            except Exception as e:
-                print("Forecast refresh error:", e, flush=True)
-        threading.Thread(target=refresh, daemon=True).start()
+    age = now - cache["time"]
+
+    # =========================
+    # 72時間以内はキャッシュ利用
+    # =========================
+    if age < HYCOM_CACHE_TTL:
+
+        # 24時間超なら裏更新
+        if age >= HYCOM_REFRESH_TTL:
+
+            with lock:
+
+                already_refreshing = (
+                    key in forecast_refreshing
+                )
+
+                if not already_refreshing:
+                    forecast_refreshing.add(key)
+
+            if not already_refreshing:
+
+                def refresh():
+
+                    try:
+
+                        print(
+                            f"HYCOM refresh start: {key}",
+                            flush=True
+                        )
+
+                        new_response = (
+                            build_forecast_response(
+                                lat,
+                                lon
+                            )
+                        )
+
+                        if (
+                            new_response["status"]
+                            == "success"
+                        ):
+
+                            with lock:
+
+                                forecast_cache[key] = {
+                                    "time": datetime.utcnow().timestamp(),
+                                    "data": new_response["data"]
+                                }
+
+                        print(
+                            f"HYCOM refresh done: {key}",
+                            flush=True
+                        )
+
+                    except Exception as e:
+
+                        print(
+                            f"Forecast refresh error: {e}",
+                            flush=True
+                        )
+
+                    finally:
+
+                        with lock:
+                            forecast_refreshing.discard(key)
+
+                threading.Thread(
+                    target=refresh,
+                    daemon=True
+                ).start()
+
         return {
             "status": "success",
             "data": cache["data"]
@@ -647,25 +662,6 @@ def forecast(
             "message": str(e),
             "data": []
         }
-
-@app.get("/weather")
-def weather(
-    lat: float = Query(...),
-    lon: float = Query(...)
-):
-
-    data = fetch_weather_logic(lat, lon)
-
-    if data is not None and "hourly" in data:
-
-        return {
-            "status": "success",
-            "weather": data
-        }
-
-    return {
-        "status": "error"
-    }
 
 @app.get("/routes")
 def routes():
