@@ -570,81 +570,81 @@ def forecast(
     # =========================
     if cache:
 
-    age = now - cache["time"]
+        age = now - cache["time"]
 
-    # =========================
-    # 72時間以内はキャッシュ利用
-    # =========================
-    if age < HYCOM_CACHE_TTL:
+        # =========================
+        # 72時間以内はキャッシュ利用
+        # =========================
+        if age < HYCOM_CACHE_TTL:
 
-        # 24時間超なら裏更新
-        if age >= HYCOM_REFRESH_TTL:
+            # 24時間超なら裏更新
+            if age >= HYCOM_REFRESH_TTL:
 
-            with lock:
+                with lock:
 
-                already_refreshing = (
-                    key in forecast_refreshing
-                )
+                    already_refreshing = (
+                        key in forecast_refreshing
+                    )
+
+                    if not already_refreshing:
+                        forecast_refreshing.add(key)
 
                 if not already_refreshing:
-                    forecast_refreshing.add(key)
 
-            if not already_refreshing:
+                    def refresh():
 
-                def refresh():
+                        try:
 
-                    try:
-
-                        print(
-                            f"HYCOM refresh start: {key}",
-                            flush=True
-                        )
-
-                        new_response = (
-                            build_forecast_response(
-                                lat,
-                                lon
+                            print(
+                                f"HYCOM refresh start: {key}",
+                                flush=True
                             )
-                        )
+ 
+                            new_response = (
+                                build_forecast_response(
+                                    lat,
+                                    lon
+                                )
+                            )
 
-                        if (
-                            new_response["status"]
-                            == "success"
-                        ):
+                            if (
+                                new_response["status"]
+                                == "success"
+                            ):
+
+                                with lock:
+
+                                    forecast_cache[key] = {
+                                        "time": datetime.utcnow().timestamp(),
+                                        "data": new_response["data"]
+                                    }
+
+                            print(
+                                f"HYCOM refresh done: {key}",
+                                flush=True
+                            )
+
+                        except Exception as e:
+
+                            print(
+                                f"Forecast refresh error: {e}",
+                                flush=True
+                            )
+
+                        finally:
 
                             with lock:
+                                forecast_refreshing.discard(key)
 
-                                forecast_cache[key] = {
-                                    "time": datetime.utcnow().timestamp(),
-                                    "data": new_response["data"]
-                                }
+                    threading.Thread(
+                        target=refresh,
+                        daemon=True
+                    ).start()
 
-                        print(
-                            f"HYCOM refresh done: {key}",
-                            flush=True
-                        )
-
-                    except Exception as e:
-
-                        print(
-                            f"Forecast refresh error: {e}",
-                            flush=True
-                        )
-
-                    finally:
-
-                        with lock:
-                            forecast_refreshing.discard(key)
-
-                threading.Thread(
-                    target=refresh,
-                    daemon=True
-                ).start()
-
-        return {
-            "status": "success",
-            "data": cache["data"]
-        }
+            return {
+                "status": "success",
+                "data": cache["data"]
+            }
     # =========================
     # FIRST FETCH
     # =========================
