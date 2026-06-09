@@ -51,7 +51,7 @@ forecast_cache = {}
 umishiru_refreshing = set()
 forecast_refreshing = set()
 
-UMISHIRU_CACHE_TTL = 43200  # 12時間
+UMISHIRU_CACHE_TTL = 30 * 60  # 1800秒 = 30分
 HYCOM_CACHE_TTL = 72 * 3600      # 72時間保持
 HYCOM_REFRESH_TTL = 24 * 3600    # 24時間で裏更新
 # =========================================================
