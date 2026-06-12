@@ -51,9 +51,8 @@ forecast_cache = {}
 umishiru_refreshing = set()
 forecast_refreshing = set()
 
-UMISHIRU_CACHE_TTL = 30 * 60  # 1800秒 = 30分
-HYCOM_CACHE_TTL = 72 * 3600      # 72時間保持
-HYCOM_REFRESH_TTL = 24 * 3600    # 24時間で裏更新
+UMISHIRU_CACHE_TTL = 43200  # 12時間
+HYCOM_CACHE_TTL = 48 * 3600      # 48時間保持
 # =========================================================
 # HYCOM CONFIG
 # =========================================================
@@ -670,7 +669,191 @@ def routes():
         route.path
         for route in app.routes
     ]
+# =========================================================
+# DAILY CACHE BUILDER
+# =========================================================
 
+UMISHIRU_AREAS = [
+    "03","01","02","04","05",
+    "06","07","08","S01"
+]
+
+HYCOM_POINTS = [
+    ("goto",32.7,128.7),
+    ("amakusa",32.3,130.0),
+    ("iki",33.9,129.7),
+    ("shimonoseki_off",34.1,130.7),
+    ("bungo",33.2,132.0),
+    ("miyazaki_off",31.9,131.9),
+    ("kochi_off",33.3,133.5),
+    ("kii",34.0,134.8),
+    ("kushimoto",33.47,135.78),
+    ("omaezaki",34.60,138.20),
+    ("suruga",34.8,138.6),
+    ("sagami",35.0,139.4),
+    ("choshi_offshore",35.5,141.0),
+    ("iwate",39.6,141.9),
+    ("sendai",38.3,141.0),
+    ("fukushima",36.9,140.9),
+    ("hachinohe",41.4,142.2),
+    ("hakodate",41.8,140.7),
+    ("hirosaki",41.2,140.2),
+    ("akita",39.7,139.9),
+    ("niigata",37.9,139.0),
+    ("toyama",37.4,137.9),
+    ("kanazawa",36.6,136.6),
+    ("wakasa",35.9,135.6),
+    ("matsue_off",35.9,133.4),
+    ("tottori",35.7,134.4),
+    ("shimane",34.9,132.1),
+    ("hagi",34.5,131.3),
+    ("sapporo",43.2,140.9),
+    ("rumoi",43.9,141.6),
+    ("monbetsu",44.3,143.3),
+    ("kushiro",42.9,144.4),
+    ("nemuro",43.3,145.9)
+]
+
+
+def build_daily_umishiru():
+
+    print("UMISHIRU DAILY START", flush=True)
+
+    success_count = 0
+
+    for area in UMISHIRU_AREAS:
+
+        try:
+
+            data = fetch_48h_parallel(area)
+
+            if data["status"] != "success":
+                continue
+
+            with lock:
+                umishiru_cache[area] = {
+                    "expires": datetime.now(JST)
+                    + timedelta(hours=12),
+                    "data": data
+                }
+
+            success_count += 1
+
+            print(
+                f"UMISHIRU OK {area}",
+                flush=True
+            )
+
+        except Exception as e:
+
+            print(
+                f"UMISHIRU FAIL {area} {e}",
+                flush=True
+            )
+
+        time.sleep(90)
+
+    return success_count
+
+
+def build_daily_hycom():
+
+    print("HYCOM DAILY START", flush=True)
+
+    for name, lat, lon in HYCOM_POINTS:
+
+        try:
+
+            response = build_forecast_response(
+                lat,
+                lon
+            )
+
+            key = (
+                f"{round(lat,2)}_"
+                f"{round(lon,2)}"
+            )
+
+            with lock:
+
+                forecast_cache[key] = {
+                    "time":
+                        datetime.utcnow().timestamp(),
+                    "data":
+                        response["data"]
+                }
+
+            print(
+                f"HYCOM OK {name}",
+                flush=True
+            )
+
+        except Exception as e:
+
+            print(
+                f"HYCOM FAIL {name} {e}",
+                flush=True
+            )
+
+        time.sleep(120)
+
+
+def scheduled_cache_builder():
+
+    last_umishiru_day = None
+    last_hycom_day = None
+
+    while True:
+
+        now = datetime.now(JST)
+
+        today = now.strftime("%Y-%m-%d")
+
+        # ====================================
+        # 01:00 海しる
+        # ====================================
+
+        if (
+            now.hour == 1
+            and now.minute < 5
+            and last_umishiru_day != today
+        ):
+
+            count = build_daily_umishiru()
+
+            if count > 0:
+                last_umishiru_day = today
+
+        # ====================================
+        # 03:00 海しる再取得
+        # ====================================
+
+        if (
+            now.hour == 3
+            and now.minute < 5
+            and last_umishiru_day != today
+        ):
+
+            count = build_daily_umishiru()
+
+            if count > 0:
+                last_umishiru_day = today
+
+        # ====================================
+        # 06:00 HYCOM
+        # ====================================
+
+        if (
+            now.hour == 6
+            and now.minute < 5
+            and last_hycom_day != today
+        ):
+
+            build_daily_hycom()
+
+            last_hycom_day = today
+
+        time.sleep(120)
 # =========================================================
 # STARTUP
 # =========================================================
@@ -698,3 +881,7 @@ def startup():
     threading.Thread(target=hycom_watchdog, daemon=True).start()
 
     print("✅ Startup complete", flush=True)
+    threading.Thread(
+        target=scheduled_cache_builder,
+        daemon=True
+    ).start()
