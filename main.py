@@ -46,13 +46,6 @@ lock = threading.Lock()
 # キャッシュ
 umishiru_cache = {}
 forecast_cache = {}
-
-# 更新中管理
-umishiru_refreshing = set()
-forecast_refreshing = set()
-
-UMISHIRU_CACHE_TTL = 43200  # 12時間
-HYCOM_CACHE_TTL = 48 * 3600      # 48時間保持
 # =========================================================
 # HYCOM CONFIG
 # =========================================================
@@ -248,8 +241,6 @@ def build_forecast_response(lat, lon):
         method="nearest"
     )
     time_values = subset["time"].values
-
-    print(time_values[:20], flush=True)
     results = []
     
     # =========================
@@ -285,7 +276,7 @@ def build_forecast_response(lat, lon):
                 "direction": round(direction, 1)
             })
 
-        except:
+        except Exception:
             continue
 
     return {
@@ -424,15 +415,12 @@ def umishiru_forecast(
         alias="areaCode"
     )
 ):
-
     if not API_KEY:
 
         return {
             "status": "error",
             "message": "MSIL_API_KEY missing"
         }
-
-    now_jst = datetime.now(JST)
 
     with lock:
         cache = umishiru_cache.get(areaCode)
@@ -442,77 +430,14 @@ def umishiru_forecast(
     # =====================================================
 
     if cache:
-        print(
-            f"UMISHIRU CACHE HIT: {areaCode}",
-            flush=True
-        )
+        
         cached_data = cache["data"]
-
-        # TTL切れなら裏更新
-        if cache["expires"] <= now_jst:
-
-            with lock:
-
-                already_refreshing = (
-                    areaCode in umishiru_refreshing
-                )
-
-                if not already_refreshing:
-                    umishiru_refreshing.add(areaCode)
-
-            if not already_refreshing:
-
-                def refresh():
-
-                    try:
-
-                        new_data = fetch_48h_parallel(
-                            areaCode
-                        )
-
-                        if new_data["status"] == "success":
-
-                            with lock:
-
-                                umishiru_cache[areaCode] = {
-                                    "expires": (
-                                        datetime.now(JST)
-                                        + timedelta(hours=12)
-                                    ),
-                                    "data": new_data
-                                }
-
-                            print(
-                                f"Umishiru refreshed: {areaCode}",
-                                flush=True
-                            )
-
-                    except Exception as e:
-
-                        print(
-                            f"Umishiru refresh error: {e}",
-                            flush=True
-                        )
-
-                    finally:
-
-                        with lock:
-                            umishiru_refreshing.discard(areaCode)
-
-                threading.Thread(
-                    target=refresh,
-                    daemon=True
-                ).start()
 
         return cached_data
 
     # =====================================================
     # 初回取得
     # =====================================================
-    print(
-        f"UMISHIRU CACHE MISS: {areaCode}",
-        flush=True
-    )
     data = fetch_48h_parallel(areaCode)
 
     if data["status"] == "success":
@@ -520,10 +445,6 @@ def umishiru_forecast(
         with lock:
 
             umishiru_cache[areaCode] = {
-                "expires": (
-                    now_jst
-                    + timedelta(hours=12)
-                ),
                 "data": data
             }
 
@@ -561,89 +482,16 @@ def forecast(
             "data": []
         }
     key = f"{round(lat,2)}_{round(lon,2)}"
-    now = datetime.utcnow().timestamp()
     with lock:
         cache = forecast_cache.get(key)
     # =========================
     # CACHE HIT
     # =========================
     if cache:
-
-        age = now - cache["time"]
-
-        # =========================
-        # 72時間以内はキャッシュ利用
-        # =========================
-        if age < HYCOM_CACHE_TTL:
-
-            # 24時間超なら裏更新
-            if age >= HYCOM_REFRESH_TTL:
-
-                with lock:
-
-                    already_refreshing = (
-                        key in forecast_refreshing
-                    )
-
-                    if not already_refreshing:
-                        forecast_refreshing.add(key)
-
-                if not already_refreshing:
-
-                    def refresh():
-
-                        try:
-
-                            print(
-                                f"HYCOM refresh start: {key}",
-                                flush=True
-                            )
- 
-                            new_response = (
-                                build_forecast_response(
-                                    lat,
-                                    lon
-                                )
-                            )
-
-                            if (
-                                new_response["status"]
-                                == "success"
-                            ):
-
-                                with lock:
-
-                                    forecast_cache[key] = {
-                                        "time": datetime.utcnow().timestamp(),
-                                        "data": new_response["data"]
-                                    }
-
-                            print(
-                                f"HYCOM refresh done: {key}",
-                                flush=True
-                            )
-
-                        except Exception as e:
-
-                            print(
-                                f"Forecast refresh error: {e}",
-                                flush=True
-                            )
-
-                        finally:
-
-                            with lock:
-                                forecast_refreshing.discard(key)
-
-                    threading.Thread(
-                        target=refresh,
-                        daemon=True
-                    ).start()
-
-            return {
-                "status": "success",
-                "data": cache["data"]
-            }
+        return {
+            "status": "success",
+            "data": cache["data"]
+        }
     # =========================
     # FIRST FETCH
     # =========================
@@ -651,7 +499,6 @@ def forecast(
         response = build_forecast_response(lat, lon)
         with lock:
             forecast_cache[key] = {
-                "time": now,
                 "data": response["data"]  # ★ここも重要
             }
         return response
@@ -732,8 +579,6 @@ def build_daily_umishiru():
 
             with lock:
                 umishiru_cache[area] = {
-                    "expires": datetime.now(JST)
-                    + timedelta(hours=12),
                     "data": data
                 }
 
@@ -777,8 +622,6 @@ def build_daily_hycom():
             with lock:
 
                 forecast_cache[key] = {
-                    "time":
-                        datetime.utcnow().timestamp(),
                     "data":
                         response["data"]
                 }
@@ -800,7 +643,8 @@ def build_daily_hycom():
 
 def scheduled_cache_builder():
 
-    last_umishiru_day = None
+    last_umishiru_1am = None
+    last_umishiru_3am = None
     last_hycom_day = None
 
     while True:
@@ -816,13 +660,13 @@ def scheduled_cache_builder():
         if (
             now.hour == 1
             and now.minute < 5
-            and last_umishiru_day != today
+            and last_umishiru_1am != today
         ):
 
             count = build_daily_umishiru()
 
             if count > 0:
-                last_umishiru_day = today
+                last_umishiru_1am = today
 
         # ====================================
         # 03:00 海しる再取得
@@ -831,13 +675,13 @@ def scheduled_cache_builder():
         if (
             now.hour == 3
             and now.minute < 5
-            and last_umishiru_day != today
+            and last_umishiru_3am != today
         ):
 
             count = build_daily_umishiru()
 
             if count > 0:
-                last_umishiru_day = today
+                last_umishiru_3am = today
 
         # ====================================
         # 06:00 HYCOM
@@ -853,7 +697,7 @@ def scheduled_cache_builder():
 
             last_hycom_day = today
 
-        time.sleep(120)
+        time.sleep(180)
 # =========================================================
 # STARTUP
 # =========================================================
