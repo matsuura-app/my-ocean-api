@@ -231,58 +231,46 @@ def get_from_hycom(lat, lon):
         }
 
 # =========================================================
-# FORECAST BUILDER
+# HYCOM FORECAST BUILDER (指摘1: estimated_time のバグを修正)
 # =========================================================
-def build_forecast_response(lat, lon):
+def build_forecast_response(ds, lat, lon):
+    try:
+        subset = ds.sel(lat=lat, lon=lon, method="nearest")
+        # time_values からの直接計算をやめ、h を使う形に修正
+        results = []
+        
+        max_time = min(48, subset.sizes["time"])
+        base_time = datetime.utcnow()
+        
+        for h in range(max_time):
+            try:
+                data = subset.isel(time=h)
 
-    subset = ds_local.sel(
-        lat=lat,
-        lon=lon,
-        method="nearest"
-    )
-    time_values = subset["time"].values
-    results = []
-    
-    # =========================
-    # ★ 現在時刻インデックス
-    # =========================
-    max_time = min(48, subset.sizes["time"])
-    base_time = datetime.utcnow()
-    
-    for h in range(max_time):
-        try:
-            data = subset.isel(time=h)
+                if "depth" in data.dims:
+                    data = data.isel(depth=0)
 
-            if "depth" in data.dims:
-                data = data.isel(depth=0)
+                u = float(data["water_u"].values)
+                v = float(data["water_v"].values)
 
-            u = float(data["water_u"].values)
-            v = float(data["water_v"].values)
+                if np.isnan(u) or np.isnan(v):
+                    continue
 
-            if np.isnan(u) or np.isnan(v):
+                speed = np.sqrt(u**2 + v**2) * 1.94384
+                direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
+
+                # ★修正: HYCOMのシリアル値ではなく、インデックス h (0〜47) をそのまま時間に使う
+                results.append({
+                    "hour_offset": float(h),
+                    "estimated_time": (base_time + timedelta(hours=h)).isoformat(),
+                    "speed": round(speed, 2),
+                    "direction": round(direction, 1)
+                })
+            except Exception:
                 continue
 
-            speed = np.sqrt(u**2 + v**2) * 1.94384
-            direction = (np.degrees(np.arctan2(v, u)) + 360) % 360
-
-            hour_offset = float(time_values[h])
-
-            results.append({
-                "hour_offset": hour_offset,
-                "estimated_time": (
-                    base_time + timedelta(hours=hour_offset)
-                ).isoformat(),
-                "speed": round(speed, 2),
-                "direction": round(direction, 1)
-            })
-
-        except Exception:
-            continue
-
-    return {
-        "status": "success",
-        "data": results
-    }
+        return {"status": "success", "data": results}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "data": []}
 
 # =========================================================
 # UMISHIRU
@@ -464,50 +452,108 @@ def root():
     }
 
 
+# =========================================================
+# API: CURRENT (修正: 陸地バグ対応、メモリキャッシュから即返却)
+# =========================================================
 @app.get("/current")
 def current(
     lat: float = Query(...),
     lon: float = Query(...)
 ):
-    return get_from_hycom(lat, lon)
+    key = f"{round(lat,2)}_{round(lon,2)}"
+    with lock:
+        cache = forecast_cache.get(key)
+        
+    # ★指摘2の修正: cacheがあり、かつdataが空っぽ（陸地）ではない場合のみ0番目を取り出す
+    if cache and len(cache.get("data", [])) > 0:
+        first_hour = cache["data"][0]
+        return {
+            "status": "success",
+            "velocity_knot": first_hour["speed"],
+            "direction": first_hour["direction"],
+            "source": "HYCOM_CACHE"
+        }
+    return {
+        "status": "loading",
+        "message": "HYCOM data not ready or the location is land"
+    }
 
+# =========================================================
+# API: FORECAST (修正: 毎回通信せず、保存されたキャッシュを即返すだけ)
+# =========================================================
 @app.get("/forecast")
 def forecast(
     lat: float = Query(...),
     lon: float = Query(...)
 ):
-    if not hycom_ready or ds_local is None:
-        return {
-            "status": "loading",
-            "data": []
-        }
     key = f"{round(lat,2)}_{round(lon,2)}"
     with lock:
         cache = forecast_cache.get(key)
-    # =========================
-    # CACHE HIT
-    # =========================
+
     if cache:
         return {
             "status": "success",
             "data": cache["data"]
         }
-    # =========================
-    # FIRST FETCH
-    # =========================
+        
+    return {
+        "status": "loading",
+        "message": "No cache available. Waiting for daily update.",
+        "data": []
+    }
+
+# =========================================================
+# HYCOM BATCH PROCESS (新設: 1回だけ安全にデータを開いて抽出し、すぐ閉じる)
+# =========================================================
+def execute_hycom_batch():
+    global hycom_ready
+    print("HYCOM BATCH PROCESS START", flush=True)
+    
+    ds = None
+    success_count = 0
+    temp_forecasts = {}
+    
     try:
-        response = build_forecast_response(lat, lon)
-        with lock:
-            forecast_cache[key] = {
-                "data": response["data"]  # ★ここも重要
-            }
-        return response
+        # chunks を追加して、巨大データを開いた瞬間のメモリ消費を大幅に節約
+        ds = xr.open_dataset(DATA_URL, engine="netcdf4", decode_times=False, chunks={"time": 10}).sel(
+            lat=slice(30, 46),
+            lon=slice(129, 146)
+        )
+
+        for name, lat, lon in HYCOM_POINTS:
+            try:
+                response = build_forecast_response(ds, lat, lon)
+                if response["status"] == "success" and response["data"]:
+                    key = f"{round(lat,2)}_{round(lon,2)}"
+                    temp_forecasts[key] = {
+                        "data": response["data"]
+                    }
+                    success_count += 1
+                    print(f"HYCOM BATCH EXTRACT OK: {name}", flush=True)
+            except Exception as item_err:
+                print(f"HYCOM BATCH EXTRACT FAIL: {name} {item_err}", flush=True)
+            
+            # 各都市の間を1秒あけて、時間をかけてゆっくり安全に処理する
+            time.sleep(1)
+
+        if success_count > 0:
+            with lock:
+                for k, v in temp_forecasts.items():
+                    forecast_cache[k] = v
+                hycom_ready = True
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e),
-            "data": []
-        }
+        print(f"HYCOM BATCH CRITICAL ERROR: {e}", flush=True)
+    finally:
+        # 【超重要】使い終わったデータセットを確実に閉じてRenderのメモリを解放する
+        if ds is not None:
+            try:
+                ds.close()
+                print("✅ HYCOM Dataset safely closed and memory freed.", flush=True)
+            except Exception:
+                pass
+                
+    return success_count
 
 @app.get("/routes")
 def routes():
@@ -605,127 +651,83 @@ def build_daily_hycom():
 
     print("HYCOM DAILY START", flush=True)
 
-    for name, lat, lon in HYCOM_POINTS:
+            for name, lat, lon in HYCOM_POINTS:
+            try:
+                response = build_forecast_response(ds, lat, lon)
+                if response["status"] == "success" and response["data"]:
+                    key = f"{round(lat,2)}_{round(lon,2)}"
+                    temp_forecasts[key] = {
+                        "data": response["data"]
+                    }
+                    success_count += 1
+                    print(f"HYCOM BATCH EXTRACT OK: {name}", flush=True)
+            except Exception as item_err:
+                print(f"HYCOM BATCH EXTRACT FAIL: {name} {item_err}", flush=True)
+            
+            # ★修正：次の地点を取得するまで180秒（3分）待つ
+            time.sleep(180)
 
-        try:
+        if success_count > 0:
 
-            response = build_forecast_response(
-                lat,
-                lon
-            )
-
-            key = (
-                f"{round(lat,2)}_"
-                f"{round(lon,2)}"
-            )
-
-            with lock:
-
-                forecast_cache[key] = {
-                    "data":
-                        response["data"]
-                }
-
-            print(
-                f"HYCOM OK {name}",
-                flush=True
-            )
-
-        except Exception as e:
-
-            print(
-                f"HYCOM FAIL {name} {e}",
-                flush=True
-            )
-
-        time.sleep(120)
-
-
+# =========================================================
+# SCHEDULED TASK & STARTUP (修正: ヘルスチェック落ち対策でバックグラウンド化)
+# =========================================================
 def scheduled_cache_builder():
-
     last_umishiru_1am = None
     last_umishiru_3am = None
     last_hycom_day = None
 
     while True:
-
         now = datetime.now(JST)
-
         today = now.strftime("%Y-%m-%d")
 
-        # ====================================
         # 01:00 海しる
-        # ====================================
-
-        if (
-            now.hour == 1
-            and now.minute < 5
-            and last_umishiru_1am != today
-        ):
-
-            count = build_daily_umishiru()
-
-            if count > 0:
+        if now.hour == 1 and now.minute < 5 and last_umishiru_1am != today:
+            if build_daily_umishiru() > 0:
                 last_umishiru_1am = today
 
-        # ====================================
         # 03:00 海しる再取得
-        # ====================================
-
-        if (
-            now.hour == 3
-            and now.minute < 5
-            and last_umishiru_3am != today
-        ):
-
-            count = build_daily_umishiru()
-
-            if count > 0:
+        if now.hour == 3 and now.minute < 5 and last_umishiru_3am != today:
+            if build_daily_umishiru() > 0:
                 last_umishiru_3am = today
 
-        # ====================================
-        # 06:00 HYCOM
-        # ====================================
+        # 🔄 06:00 HYCOM 毎日更新（成功するまで毎時トライ）
+        if now.hour >= 6 and last_hycom_day != today:
+            print(f"⏰ Starting HYCOM daily batch attempt at {now.strftime('%H:%M')}", flush=True)
+            
+            count = execute_hycom_batch()
+            
+            if count > 0:
+                print(f"✅ HYCOM daily batch success! ({count} points cached)", flush=True)
+                last_hycom_day = today
+            else:
+                print("❌ HYCOM daily batch failed completely. Will retry in 1 hour.", flush=True)
+                time.sleep(3600)
 
-        if (
-            now.hour == 6
-            and now.minute < 5
-            and last_hycom_day != today
-        ):
+        time.sleep(120)
 
-            build_daily_hycom()
 
-            last_hycom_day = today
+# 起動時に別スレッドで安全に最初のキャッシュを作るための関数
+def run_initial_hycom_batch():
+    print("Background thread: Building initial HYCOM cache...", flush=True)
+    for i in range(3):
+        count = execute_hycom_batch()
+        if count > 0:
+            print("✅ Initial HYCOM cache built successfully via background thread.", flush=True)
+            break
+        print(f"⚠️ retry initial HYCOM batch {i+1}/3", flush=True)
+        time.sleep(10)
 
-        time.sleep(180)
-# =========================================================
-# STARTUP
-# =========================================================
+
 @app.on_event("startup")
 def startup():
-    global hycom_ready
-
     print("🚀 Startup begin", flush=True)
 
-    hycom_ready = False
+    # ★指摘の修正: 重い初回取得を別スレッドに逃がし、Webサーバー自体は「一瞬」で起動させる
+    # これにより Render のヘルスチェックによる強制終了（タイムアウト）を完全に回避します
+    threading.Thread(target=run_initial_hycom_batch, daemon=True).start()
 
-    for i in range(3):
-        load_hycom()
-
-        if hycom_ready:
-            print("✅ HYCOM ready", flush=True)
-            break
-
-        print(f"⚠️ retry HYCOM load {i+1}", flush=True)
-        time.sleep(5)
-
-    if not hycom_ready:
-        print("❌ HYCOM failed after retries", flush=True)
-
-    threading.Thread(target=hycom_watchdog, daemon=True).start()
-
-    print("✅ Startup complete", flush=True)
-    threading.Thread(
-        target=scheduled_cache_builder,
-        daemon=True
-    ).start()
+    # 定期監視タスクもスレッドで起動
+    threading.Thread(target=scheduled_cache_builder, daemon=True).start()
+    
+    print("✅ Startup complete (API web server is now live and listening)", flush=True)
