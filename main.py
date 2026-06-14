@@ -55,125 +55,7 @@ DATA_URL = (
     "FMRC_ESPC-D-V02_uv3z/"
     "FMRC_ESPC-D-V02_uv3z_best.ncd"
 )
-
-ds_local = None
 hycom_ready = False
-
-# =========================================================
-# HYCOM LOAD
-# =========================================================
-def load_hycom():
-    global ds_local, hycom_ready
-
-    hycom_ready = False   # ★これ必須
-
-    print("HYCOM loading...", flush=True)
-
-    try:
-        ds = xr.open_dataset(
-            DATA_URL,
-            engine="netcdf4",
-            decode_times=False,
-        ).sel(
-            lat=slice(30, 46),
-            lon=slice(129, 146)
-        )
-
-        with lock:
-            ds_local = ds
-            hycom_ready = True
-
-        print("HYCOM loaded", flush=True)
-
-    except Exception as e:
-        hycom_ready = False
-        print(f"HYCOM load error: {e}", flush=True)
-# =========================================================
-# HYCOM WATCHDOG
-# =========================================================
-def hycom_watchdog():
-    global ds_local
-    global hycom_ready
-    while True:
-        test_ds = None
-        old_ds = None
-        try:
-            test_ds = xr.open_dataset(
-                DATA_URL,
-                engine="netcdf4",
-                decode_times=False
-            )
-
-            new_time_size = test_ds.sizes.get(
-                "time",
-                0
-            )
-            # 初回復旧
-            if ds_local is None:
-                print(
-                    "HYCOM first load from watchdog",
-                    flush=True
-                )
-                new_ds = xr.open_dataset(
-                    DATA_URL,
-                    engine="netcdf4",
-                    decode_times=False,
-                ).sel(
-                    lat=slice(30, 46),
-                    lon=slice(129, 146)
-                )
-                with lock:
-                    ds_local = new_ds
-                    hycom_ready = True
-            # 更新検知
-            else:
-                old_time_size = ds_local.sizes.get(
-                    "time",
-                    0
-                )
-                if new_time_size != old_time_size:
-                    print(
-                        "🔄 HYCOM updated",
-                        flush=True
-                    )
-                    new_ds = xr.open_dataset(
-                        DATA_URL,
-                        engine="netcdf4",
-                        decode_times=False,
-                        chunks={}
-                    ).sel(
-                        lat=slice(30, 46),
-                        lon=slice(129, 146)
-                    )
-                    with lock:
-                        old_ds = ds_local
-                        ds_local = new_ds
-                        hycom_ready = True
-                    time.sleep(5)
-                    if old_ds is not None:
-                        try:
-                            old_ds.close()
-                        except Exception:
-                            pass
-
-        except Exception as e:
-            print(
-                f"HYCOM not reachable: {e}",
-                flush=True
-            )
-
-        finally:
-
-            if test_ds is not None:
-
-                try:
-                    test_ds.close()
-                except Exception:
-                    pass
-
-        # 12時間ごと
-        time.sleep(12 * 3600)
-
 # =========================================================
 # HYCOM CURRENT
 # =========================================================
@@ -461,23 +343,25 @@ def current(
     lon: float = Query(...)
 ):
     key = f"{round(lat,2)}_{round(lon,2)}"
+
     with lock:
         cache = forecast_cache.get(key)
-        
-    # ★指摘2の修正: cacheがあり、かつdataが空っぽ（陸地）ではない場合のみ0番目を取り出す
+
     if cache and len(cache.get("data", [])) > 0:
-        first_hour = cache["data"][0]
+
+        first = cache["data"][0]
+
         return {
             "status": "success",
-            "velocity_knot": first_hour["speed"],
-            "direction": first_hour["direction"],
+            "velocity_knot": first["speed"],
+            "direction": first["direction"],
             "source": "HYCOM_CACHE"
         }
+
     return {
         "status": "loading",
-        "message": "HYCOM data not ready or the location is land"
+        "message": "cache not ready"
     }
-
 # =========================================================
 # API: FORECAST (修正: 毎回通信せず、保存されたキャッシュを即返すだけ)
 # =========================================================
@@ -487,6 +371,7 @@ def forecast(
     lon: float = Query(...)
 ):
     key = f"{round(lat,2)}_{round(lon,2)}"
+
     with lock:
         cache = forecast_cache.get(key)
 
@@ -495,13 +380,11 @@ def forecast(
             "status": "success",
             "data": cache["data"]
         }
-        
+
     return {
         "status": "loading",
-        "message": "No cache available. Waiting for daily update.",
         "data": []
     }
-
 # =========================================================
 # HYCOM BATCH PROCESS (新設: 1回だけ安全にデータを開いて抽出し、すぐ閉じる)
 # =========================================================
@@ -537,10 +420,11 @@ def execute_hycom_batch():
             time.sleep(1)
 
         if success_count > 0:
+
             with lock:
-                for k, v in temp_forecasts.items():
-                    forecast_cache[k] = v
-                hycom_ready = True
+                forecast_cache.update(temp_forecasts)
+
+            hycom_ready = True
 
     except Exception as e:
         print(f"HYCOM BATCH CRITICAL ERROR: {e}", flush=True)
@@ -647,27 +531,6 @@ def build_daily_umishiru():
     return success_count
 
 
-def build_daily_hycom():
-
-    print("HYCOM DAILY START", flush=True)
-
-            for name, lat, lon in HYCOM_POINTS:
-            try:
-                response = build_forecast_response(ds, lat, lon)
-                if response["status"] == "success" and response["data"]:
-                    key = f"{round(lat,2)}_{round(lon,2)}"
-                    temp_forecasts[key] = {
-                        "data": response["data"]
-                    }
-                    success_count += 1
-                    print(f"HYCOM BATCH EXTRACT OK: {name}", flush=True)
-            except Exception as item_err:
-                print(f"HYCOM BATCH EXTRACT FAIL: {name} {item_err}", flush=True)
-            
-            # ★修正：次の地点を取得するまで180秒（3分）待つ
-            time.sleep(180)
-
-        if success_count > 0:
 
 # =========================================================
 # SCHEDULED TASK & STARTUP (修正: ヘルスチェック落ち対策でバックグラウンド化)
@@ -721,13 +584,23 @@ def run_initial_hycom_batch():
 
 @app.on_event("startup")
 def startup():
-    print("🚀 Startup begin", flush=True)
 
-    # ★指摘の修正: 重い初回取得を別スレッドに逃がし、Webサーバー自体は「一瞬」で起動させる
-    # これにより Render のヘルスチェックによる強制終了（タイムアウト）を完全に回避します
-    threading.Thread(target=run_initial_hycom_batch, daemon=True).start()
+    print(
+        "Startup begin",
+        flush=True
+    )
 
-    # 定期監視タスクもスレッドで起動
-    threading.Thread(target=scheduled_cache_builder, daemon=True).start()
-    
-    print("✅ Startup complete (API web server is now live and listening)", flush=True)
+    threading.Thread(
+        target=scheduled_cache_builder,
+        daemon=True
+    ).start()
+
+    threading.Thread(
+        target=execute_hycom_batch,
+        daemon=True
+    ).start()
+
+    print(
+        "Startup complete",
+        flush=True
+    )
