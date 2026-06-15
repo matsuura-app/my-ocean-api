@@ -398,7 +398,7 @@ def execute_hycom_batch():
     
     try:
         # chunks を追加して、巨大データを開いた瞬間のメモリ消費を大幅に節約
-        ds = xr.open_dataset(DATA_URL, engine="netcdf4", decode_times=False
+        ds = xr.open_dataset(DATA_URL,engine="netcdf4",decode_times=False
         ).sel(
             lat=slice(30, 46),
             lon=slice(129, 146)
@@ -418,7 +418,7 @@ def execute_hycom_batch():
                 print(f"HYCOM BATCH EXTRACT FAIL: {name} {item_err}", flush=True)
             
             # 各都市の間を1秒あけて、時間をかけてゆっくり安全に処理する
-            time.sleep(1)
+            time.sleep(180)
 
         if success_count > 0:
 
@@ -568,7 +568,7 @@ def scheduled_cache_builder():
                 print("❌ HYCOM daily batch failed completely. Will retry in 1 hour.", flush=True)
                 time.sleep(3600)
 
-        time.sleep(120)
+        time.sleep(180)
 
 
 # 起動時に別スレッドで安全に最初のキャッシュを作るための関数
@@ -580,7 +580,7 @@ def run_initial_hycom_batch():
             print("✅ Initial HYCOM cache built successfully via background thread.", flush=True)
             break
         print(f"⚠️ retry initial HYCOM batch {i+1}/3", flush=True)
-        time.sleep(10)
+        time.sleep(30)
 
 
 @app.on_event("startup")
@@ -593,11 +593,6 @@ def startup():
 
     threading.Thread(
         target=scheduled_cache_builder,
-        daemon=True
-    ).start()
-
-    threading.Thread(
-        target=execute_hycom_batch,
         daemon=True
     ).start()
 
