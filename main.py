@@ -390,56 +390,100 @@ def forecast(
 # =========================================================
 def execute_hycom_batch():
     global hycom_ready
-    print("HYCOM BATCH PROCESS START", flush=True)
-    
-    ds = None
-    success_count = 0
-    temp_forecasts = {}
-    
-    try:
-        # chunks を追加して、巨大データを開いた瞬間のメモリ消費を大幅に節約
-        ds = xr.open_dataset(DATA_URL,engine="netcdf4",decode_times=False
-        ).sel(
-            lat=slice(30, 46),
-            lon=slice(129, 146)
-        )
 
-        for name, lat, lon in HYCOM_POINTS:
-            try:
-                response = build_forecast_response(ds, lat, lon)
-                if response["status"] == "success" and response["data"]:
-                    key = f"{round(lat,2)}_{round(lon,2)}"
-                    temp_forecasts[key] = {
+    print("HYCOM BATCH PROCESS START", flush=True)
+
+    success_count = 0
+
+    for name, lat, lon in HYCOM_POINTS:
+
+        ds = None
+
+        try:
+
+            print(
+                f"HYCOM START: {name}",
+                flush=True
+            )
+
+            ds = xr.open_dataset(
+                DATA_URL,
+                engine="netcdf4",
+                decode_times=False
+            ).sel(
+                lat=slice(30, 46),
+                lon=slice(129, 146)
+            )
+
+            response = build_forecast_response(
+                ds,
+                lat,
+                lon
+            )
+
+            if (
+                response["status"] == "success"
+                and response["data"]
+            ):
+
+                key = f"{round(lat,2)}_{round(lon,2)}"
+
+                with lock:
+
+                    forecast_cache[key] = {
                         "data": response["data"]
                     }
-                    success_count += 1
-                    print(f"HYCOM BATCH EXTRACT OK: {name}", flush=True)
-            except Exception as item_err:
-                print(f"HYCOM BATCH EXTRACT FAIL: {name} {item_err}", flush=True)
-            
-            # 各都市の間を1秒あけて、時間をかけてゆっくり安全に処理する
-            time.sleep(180)
 
-        if success_count > 0:
+                success_count += 1
 
-            with lock:
-                forecast_cache.update(temp_forecasts)
+                print(
+                    f"HYCOM SAVED: {name}",
+                    flush=True
+                )
 
-            hycom_ready = True
+            else:
 
-    except Exception as e:
-        print(f"HYCOM BATCH CRITICAL ERROR: {e}", flush=True)
-    finally:
-        # 【超重要】使い終わったデータセットを確実に閉じてRenderのメモリを解放する
-        if ds is not None:
-            try:
-                ds.close()
-                print("✅ HYCOM Dataset safely closed and memory freed.", flush=True)
-            except Exception:
-                pass
-                
+                print(
+                    f"HYCOM EMPTY: {name}",
+                    flush=True
+                )
+
+        except Exception as e:
+
+            print(
+                f"HYCOM FAIL: {name} {e}",
+                flush=True
+            )
+
+        finally:
+
+            if ds is not None:
+
+                try:
+
+                    ds.close()
+
+                    print(
+                        f"HYCOM CLOSED: {name}",
+                        flush=True
+                    )
+
+                except Exception:
+                    pass
+
+        # 3分待機
+        time.sleep(300)
+
+    if success_count > 0:
+
+        hycom_ready = True
+
+    print(
+        f"HYCOM BATCH COMPLETE ({success_count})",
+        flush=True
+    )
+
     return success_count
-
 @app.get("/routes")
 def routes():
 
