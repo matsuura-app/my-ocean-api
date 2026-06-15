@@ -398,7 +398,8 @@ def execute_hycom_batch():
     
     try:
         # chunks を追加して、巨大データを開いた瞬間のメモリ消費を大幅に節約
-        ds = xr.open_dataset(DATA_URL, engine="netcdf4", decode_times=False, chunks={"time": 10}).sel(
+        ds = xr.open_dataset(DATA_URL, engine="netcdf4", decode_times=False
+        ).sel(
             lat=slice(30, 46),
             lon=slice(129, 146)
         )
