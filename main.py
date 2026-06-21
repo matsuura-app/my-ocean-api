@@ -142,8 +142,9 @@ def build_forecast_response(ds, lat, lon):
 
                 # ★修正: HYCOMのシリアル値ではなく、インデックス h (0〜47) をそのまま時間に使う
                 results.append({
-                    "hour_offset": float(h),
-                    "estimated_time": (base_time + timedelta(hours=h)).isoformat(),
+                    "hour_offset": float(h * 3),
+                    "estimated_time": (base_time + timedelta(hours=h * 3)
+                    ).isoformat(),
                     "speed": round(speed, 2),
                     "direction": round(direction, 1)
                 })
