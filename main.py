@@ -118,27 +118,7 @@ def get_from_hycom(lat, lon):
 def build_forecast_response(ds, lat, lon):
     try:
         subset = ds.sel(lat=lat, lon=lon, method="nearest")
-       print("===== HYCOM TIME CHECK =====", flush=True)
-
-        times = subset["time"].values
-
-        for i in range(min(10, len(times))):
-
-            print(i, times[i], flush=True)
-
-        if len(times) > 1:
-
-            print(
-
-                "TIME DIFF =",
-
-                times[1] - times[0],
-
-                flush=True
-
-            )
-
-        print("===========================", flush=True) # time_values からの直接計算をやめ、h を使う形に修正
+        # time_values からの直接計算をやめ、h を使う形に修正
         results = []
         
         max_time = min(48, subset.sizes["time"])
